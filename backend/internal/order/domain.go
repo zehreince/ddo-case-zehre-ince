@@ -28,6 +28,15 @@ var (
 	ErrEmpty             = errors.New("sipariş edilecek ürün yok")
 )
 
+// Outbox olay türleri: saga'nın adımları bu olaylarla ilerler.
+const (
+	EventPlaced        = "order.placed"         // → ödeme iste
+	EventPaid          = "order.paid"           // → satıcıya bildir, kargo oluştur
+	EventPaymentFailed = "order.payment_failed" // telafi: stok iade edildi
+	EventCancelled     = "order.cancelled"      // müşteri iptali, stok iade edildi
+	EventExpired       = "order.expired"        // ödeme süresi doldu, stok iade edildi
+)
+
 type Status string
 
 const (
@@ -46,6 +55,7 @@ type Order struct {
 	TotalKurus      int64               `json:"total_kurus"`
 	PaymentDeadline time.Time           `json:"payment_deadline"`
 	CreatedAt       time.Time           `json:"created_at"`
+	Payment         *PaymentInfo        `json:"payment,omitempty"`
 	SubOrders       []SubOrder          `json:"sub_orders"`
 	Unavailable     []inventory.Failure `json:"unavailable_items,omitempty"`
 }
@@ -59,6 +69,21 @@ type SubOrder struct {
 	DiscountKurus int64  `json:"discount_kurus"`
 	TotalKurus    int64  `json:"total_kurus"`
 	Items         []Line `json:"items"`
+	// Shipment ödeme alındıktan sonra kargo adımı başlayınca dolar.
+	Shipment *ShipmentInfo `json:"shipment,omitempty"`
+}
+
+// PaymentInfo siparişin ödeme adımının durumudur (saga ilerleyişi).
+type PaymentInfo struct {
+	ID            string  `json:"id"`
+	Status        string  `json:"status"`
+	FailureReason *string `json:"failure_reason,omitempty"`
+	CallbackCount int     `json:"callback_count"`
+}
+
+type ShipmentInfo struct {
+	TrackingNumber *string `json:"tracking_number"`
+	Status         string  `json:"status"`
 }
 
 type Line struct {

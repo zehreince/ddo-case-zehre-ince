@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"carsihub/internal/inventory"
+	"carsihub/internal/outbox"
 	"carsihub/internal/platform/audit"
 	"carsihub/internal/platform/pagination"
 )
@@ -102,6 +103,18 @@ func (s *Service) PlaceInTx(ctx context.Context, tx pgx.Tx, customerID string, i
 	if _, err := tx.Exec(ctx, `UPDATE stock_reservations SET order_id = $1::uuid WHERE id = ANY($2::uuid[])`, o.ID, reservationIDs); err != nil {
 		return nil, err
 	}
+	// Ödeme kaydı ve saga'yı başlatan olay siparişle aynı transaction'da.
+	var paymentID string
+	if err := tx.QueryRow(ctx, `
+		INSERT INTO payments (order_id, amount_kurus, status) VALUES ($1::uuid, $2, 'pending') RETURNING id::text`,
+		o.ID, o.TotalKurus).Scan(&paymentID); err != nil {
+		return nil, err
+	}
+	if err := outbox.Write(ctx, tx, EventPlaced, "order", o.ID, map[string]any{
+		"order_id": o.ID, "payment_id": paymentID, "total_kurus": o.TotalKurus,
+	}); err != nil {
+		return nil, err
+	}
 	if err := audit.Record(ctx, tx, audit.Entry{
 		ActorID: customerID, ActorRole: "customer", Action: "order.placed",
 		EntityType: "order", EntityID: o.ID, RequestID: requestID,
@@ -122,7 +135,7 @@ func (s *Service) Cancel(ctx context.Context, customerID, orderID, requestID str
 			return ErrNotCancellable
 		}
 		return s.close(ctx, tx, orderID, StatusCancelled, "released", audit.Entry{
-			ActorID: customerID, ActorRole: "customer", Action: "order.cancelled", RequestID: requestID,
+			ActorID: customerID, ActorRole: "customer", Action: EventCancelled, RequestID: requestID,
 		})
 	})
 	if err != nil {
@@ -135,30 +148,50 @@ func (s *Service) Cancel(ctx context.Context, customerID, orderID, requestID str
 // güvenlidir (çift ödeme bildirimi): zaten ödenmişse hiçbir şey yapmaz.
 func (s *Service) MarkPaid(ctx context.Context, orderID string) error {
 	return s.inLockedOrder(ctx, orderID, func(tx pgx.Tx, _ string, status Status) error {
-		switch status {
-		case StatusPaid:
-			return nil
-		case StatusPendingPayment:
-		default:
-			return ErrNotCancellable
-		}
-		ids, err := reservationIDs(ctx, tx, orderID)
-		if err != nil {
-			return err
-		}
-		if err := inventory.Commit(ctx, tx, ids); err != nil {
-			return err
-		}
-		if _, err := tx.Exec(ctx, `UPDATE orders SET status = 'paid', updated_at = now() WHERE id = $1::uuid`, orderID); err != nil {
-			return err
-		}
-		if _, err := tx.Exec(ctx, `UPDATE sub_orders SET status = 'awaiting_shipment' WHERE order_id = $1::uuid`, orderID); err != nil {
-			return err
-		}
-		return audit.Record(ctx, tx, audit.Entry{
-			Action: "order.paid", EntityType: "order", EntityID: orderID,
-			Old: map[string]any{"status": status}, New: map[string]any{"status": StatusPaid},
-		})
+		return s.MarkPaidTx(ctx, tx, orderID, status)
+	})
+}
+
+// MarkPaidTx MarkPaid'in transaction içi hâlidir; sipariş LockTx ile kilitlenmiş olmalıdır.
+// Sipariş kapanmışsa (iptal, süre dolumu) ErrNotCancellable döner; çağıran iade başlatır.
+func (s *Service) MarkPaidTx(ctx context.Context, tx pgx.Tx, orderID string, status Status) error {
+	switch status {
+	case StatusPaid:
+		return nil
+	case StatusPendingPayment:
+	default:
+		return ErrNotCancellable
+	}
+	ids, err := reservationIDs(ctx, tx, orderID)
+	if err != nil {
+		return err
+	}
+	if err := inventory.Commit(ctx, tx, ids); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE orders SET status = 'paid', updated_at = now() WHERE id = $1::uuid`, orderID); err != nil {
+		return err
+	}
+	rows, err := tx.Query(ctx, `
+		UPDATE sub_orders SET status = 'awaiting_shipment' WHERE order_id = $1::uuid
+		RETURNING id::text, seller_id::text`, orderID)
+	if err != nil {
+		return err
+	}
+	subs, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (map[string]string, error) {
+		var id, seller string
+		err := r.Scan(&id, &seller)
+		return map[string]string{"sub_order_id": id, "seller_id": seller}, err
+	})
+	if err != nil {
+		return err
+	}
+	if err := outbox.Write(ctx, tx, EventPaid, "order", orderID, map[string]any{"order_id": orderID, "sub_orders": subs}); err != nil {
+		return err
+	}
+	return audit.Record(ctx, tx, audit.Entry{
+		Action: EventPaid, EntityType: "order", EntityID: orderID,
+		Old: map[string]any{"status": status}, New: map[string]any{"status": StatusPaid},
 	})
 }
 
@@ -166,12 +199,17 @@ func (s *Service) MarkPaid(ctx context.Context, orderID string) error {
 // Tekrar çağrılması güvenlidir.
 func (s *Service) FailPayment(ctx context.Context, orderID, reason string) error {
 	return s.inLockedOrder(ctx, orderID, func(tx pgx.Tx, _ string, status Status) error {
-		if status != StatusPendingPayment {
-			return nil
-		}
-		return s.close(ctx, tx, orderID, StatusCancelled, "released", audit.Entry{
-			Action: "order.payment_failed", New: map[string]any{"reason": reason},
-		})
+		return s.FailPaymentTx(ctx, tx, orderID, status, reason)
+	})
+}
+
+// FailPaymentTx FailPayment'in transaction içi hâlidir (telafi: stok iadesi).
+func (s *Service) FailPaymentTx(ctx context.Context, tx pgx.Tx, orderID string, status Status, reason string) error {
+	if status != StatusPendingPayment {
+		return nil
+	}
+	return s.close(ctx, tx, orderID, StatusCancelled, "released", audit.Entry{
+		Action: EventPaymentFailed, New: map[string]any{"reason": reason},
 	})
 }
 
@@ -199,14 +237,15 @@ func (s *Service) ExpireUnpaid(ctx context.Context, limit int) (int, error) {
 		return 0, err
 	}
 	for _, id := range ids {
-		if err := s.close(ctx, tx, id, StatusExpired, "expired", audit.Entry{Action: "order.expired"}); err != nil {
+		if err := s.close(ctx, tx, id, StatusExpired, "expired", audit.Entry{Action: EventExpired}); err != nil {
 			return 0, err
 		}
 	}
 	return len(ids), tx.Commit(ctx)
 }
 
-// close siparişin rezervasyonlarını bırakır ve sipariş ile alt siparişlerin durumunu günceller.
+// close siparişin rezervasyonlarını bırakır, sipariş ile alt siparişlerin
+// durumunu günceller ve audit kaydının eylem adıyla bir outbox olayı yazar.
 func (s *Service) close(ctx context.Context, tx pgx.Tx, orderID string, to Status, reservationStatus string, e audit.Entry) error {
 	ids, err := reservationIDs(ctx, tx, orderID)
 	if err != nil {
@@ -230,7 +269,19 @@ func (s *Service) close(ctx context.Context, tx pgx.Tx, orderID string, to Statu
 		m["released_reservations"] = len(ids)
 	}
 	e.Old = map[string]any{"status": StatusPendingPayment}
+	if err := outbox.Write(ctx, tx, e.Action, "order", orderID, map[string]any{"order_id": orderID, "status": to}); err != nil {
+		return err
+	}
 	return audit.Record(ctx, tx, e)
+}
+
+// LockTx siparişi kilitler (global kilit sırasının ilk halkası) ve sahibini, durumunu döner.
+func LockTx(ctx context.Context, tx pgx.Tx, orderID string) (owner string, status Status, err error) {
+	err = tx.QueryRow(ctx, `SELECT customer_id::text, status FROM orders WHERE id = $1::uuid FOR UPDATE`, orderID).Scan(&owner, &status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", "", ErrNotFound
+	}
+	return owner, status, err
 }
 
 // inLockedOrder siparişi kilitleyip fn'i aynı transaction'da çalıştırır.
@@ -241,14 +292,7 @@ func (s *Service) inLockedOrder(ctx context.Context, orderID string, fn func(tx 
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	var (
-		owner  string
-		status Status
-	)
-	err = tx.QueryRow(ctx, `SELECT customer_id::text, status FROM orders WHERE id = $1::uuid FOR UPDATE`, orderID).Scan(&owner, &status)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return ErrNotFound
-	}
+	owner, status, err := LockTx(ctx, tx, orderID)
 	if err != nil {
 		return err
 	}
@@ -280,12 +324,24 @@ func (s *Service) Get(ctx context.Context, orderID string) (*Order, error) {
 		return nil, err
 	}
 
+	var pay PaymentInfo
+	err = s.pool.QueryRow(ctx, `SELECT id::text, status, failure_reason, callback_count FROM payments WHERE order_id = $1::uuid`, orderID).
+		Scan(&pay.ID, &pay.Status, &pay.FailureReason, &pay.CallbackCount)
+	switch {
+	case err == nil:
+		o.Payment = &pay
+	case !errors.Is(err, pgx.ErrNoRows):
+		return nil, err
+	}
+
 	rows, err := s.pool.Query(ctx, `
 		SELECT so.id::text, so.seller_id::text, se.name, so.status, so.subtotal_kurus, so.discount_kurus, so.total_kurus,
+		       sh.tracking_number, sh.status,
 		       oi.id::text, oi.offer_id::text, oi.quantity, oi.unit_price_kurus, oi.line_total_kurus
 		FROM sub_orders so
 		JOIN sellers se ON se.id = so.seller_id
 		JOIN order_items oi ON oi.sub_order_id = so.id
+		LEFT JOIN shipments sh ON sh.sub_order_id = so.id
 		WHERE so.order_id = $1::uuid
 		ORDER BY so.seller_id, oi.id`, orderID)
 	if err != nil {
@@ -293,11 +349,19 @@ func (s *Service) Get(ctx context.Context, orderID string) (*Order, error) {
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var sub SubOrder
-		var l Line
+		var (
+			sub         SubOrder
+			l           Line
+			tracking    *string
+			shipmentSts *string
+		)
 		if err := rows.Scan(&sub.ID, &sub.SellerID, &sub.SellerName, &sub.Status, &sub.SubtotalKurus, &sub.DiscountKurus, &sub.TotalKurus,
+			&tracking, &shipmentSts,
 			&l.ID, &l.OfferID, &l.Quantity, &l.UnitPriceKurus, &l.LineTotalKurus); err != nil {
 			return nil, err
+		}
+		if shipmentSts != nil {
+			sub.Shipment = &ShipmentInfo{TrackingNumber: tracking, Status: *shipmentSts}
 		}
 		if n := len(o.SubOrders); n == 0 || o.SubOrders[n-1].ID != sub.ID {
 			o.SubOrders = append(o.SubOrders, sub)
