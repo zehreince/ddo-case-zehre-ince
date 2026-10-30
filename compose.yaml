@@ -46,6 +46,21 @@ services:
       timeout: 3s
       retries: 12
 
+  # Süresi dolan sepet rezervasyonlarını ve ödenmeyen siparişleri süpürür.
+  worker:
+    <<: *backend
+    command: ["worker"]
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/worker", "healthcheck"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
   frontend:
     build:
       context: ./frontend

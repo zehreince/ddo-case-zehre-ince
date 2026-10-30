@@ -33,6 +33,9 @@ func New() *Metrics {
 	return &Metrics{registry: reg, duration: duration}
 }
 
+// MustRegister alan paketlerinin kendi metriklerini aynı kayıt defterine ekler.
+func (m *Metrics) MustRegister(cs ...prometheus.Collector) { m.registry.MustRegister(cs...) }
+
 func (m *Metrics) Handler() http.Handler {
 	return promhttp.HandlerFor(m.registry, promhttp.HandlerOpts{})
 }

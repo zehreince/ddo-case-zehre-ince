@@ -28,6 +28,12 @@ type Config struct {
 	RefreshTTL   time.Duration
 	BcryptCost   int
 	CookieSecure bool
+
+	ReservationTTL     time.Duration // sepette stok tutma süresi
+	PaymentTTL         time.Duration // siparişin ödeme beklediği süre
+	PartialFulfillment string        // allow | reject
+	SweepInterval      time.Duration // worker süpürme aralığı
+	WorkerPort         int
 }
 
 const minJWTSecretLen = 32
@@ -54,6 +60,12 @@ func Load(lookup LookupFunc) (Config, error) {
 		RefreshTTL:      r.duration("JWT_REFRESH_TTL", 7*24*time.Hour),
 		BcryptCost:      r.int("BCRYPT_COST", 12),
 		CookieSecure:    r.bool("COOKIE_SECURE", false),
+
+		ReservationTTL:     r.duration("RESERVATION_TTL", 15*time.Minute),
+		PaymentTTL:         r.duration("ORDER_PAYMENT_TTL", 15*time.Minute),
+		PartialFulfillment: r.str("PARTIAL_FULFILLMENT", "allow"),
+		SweepInterval:      r.duration("SWEEP_INTERVAL", 5*time.Second),
+		WorkerPort:         r.int("WORKER_PORT", 8081),
 	}
 	if cfg.DBMaxConns < 1 {
 		r.errs = append(r.errs, errors.New("DB_MAX_CONNS: en az 1 olmalı"))
@@ -63,6 +75,9 @@ func Load(lookup LookupFunc) (Config, error) {
 	}
 	if cfg.BcryptCost < 4 || cfg.BcryptCost > 31 {
 		r.errs = append(r.errs, errors.New("BCRYPT_COST: 4 ile 31 arasında olmalı"))
+	}
+	if cfg.PartialFulfillment != "allow" && cfg.PartialFulfillment != "reject" {
+		r.errs = append(r.errs, fmt.Errorf("PARTIAL_FULFILLMENT: allow ya da reject olmalı: %q", cfg.PartialFulfillment))
 	}
 	if err := errors.Join(r.errs...); err != nil {
 		return Config{}, fmt.Errorf("yapılandırma hatası: %w", err)

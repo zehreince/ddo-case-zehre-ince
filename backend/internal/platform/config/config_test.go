@@ -29,6 +29,9 @@ func TestLoad_Defaults(t *testing.T) {
 	if cfg.APIPort != 8080 || cfg.DBMaxConns != 50 || cfg.RequestTimeout != 10*time.Second {
 		t.Fatalf("varsayılanlar yanlış: %+v", cfg)
 	}
+	if cfg.PartialFulfillment != "allow" || cfg.ReservationTTL != 15*time.Minute || cfg.PaymentTTL != 15*time.Minute {
+		t.Fatalf("stok varsayılanları yanlış: %+v", cfg)
+	}
 	if cfg.AccessTTL != 15*time.Minute || cfg.BcryptCost != 12 || cfg.CookieSecure {
 		t.Fatalf("auth varsayılanları yanlış: %+v", cfg)
 	}
@@ -71,14 +74,15 @@ func TestLoad_ReportsAllErrorsAtOnce(t *testing.T) {
 
 func TestLoad_RejectsWeakAuthSettings(t *testing.T) {
 	_, err := Load(valid(map[string]string{
-		"JWT_SECRET":    "kisa",
-		"BCRYPT_COST":   "3",
-		"COOKIE_SECURE": "belki",
+		"JWT_SECRET":          "kisa",
+		"BCRYPT_COST":         "3",
+		"COOKIE_SECURE":       "belki",
+		"PARTIAL_FULFILLMENT": "bazen",
 	}))
 	if err == nil {
 		t.Fatal("hata bekleniyordu")
 	}
-	for _, want := range []string{"JWT_SECRET", "BCRYPT_COST", "COOKIE_SECURE"} {
+	for _, want := range []string{"JWT_SECRET", "BCRYPT_COST", "COOKIE_SECURE", "PARTIAL_FULFILLMENT"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("hata %q içermeli: %v", want, err)
 		}
