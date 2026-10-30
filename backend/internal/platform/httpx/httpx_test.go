@@ -122,3 +122,18 @@ func TestAccessLog_WritesStatusWithoutHeaders(t *testing.T) {
 		t.Fatalf("erişim logu yanlış: %s", buf.String())
 	}
 }
+
+func TestIsUUID(t *testing.T) {
+	for s, want := range map[string]bool{
+		"123e4567-e89b-12d3-a456-426614174000": true,
+		"123E4567-E89B-12D3-A456-426614174000": true,
+		"123e4567e89b12d3a456426614174000":     false,
+		"123e4567-e89b-12d3-a456-42661417400g": false,
+		"123e4567-e89b-12d3-a456_426614174000": false,
+		"":                                     false,
+	} {
+		if IsUUID(s) != want {
+			t.Errorf("IsUUID(%q) != %v", s, want)
+		}
+	}
+}

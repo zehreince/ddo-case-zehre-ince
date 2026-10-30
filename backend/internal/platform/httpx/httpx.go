@@ -33,6 +33,8 @@ type ErrorDetail struct {
 	Message string `json:"message"`
 	// Fields yalnızca doğrulama hatalarında doludur: alan adı → sorun.
 	Fields map[string]string `json:"fields,omitempty"`
+	// Details hataya özgü yapılandırılmış bilgidir (ör. stoğu yetmeyen kalemler).
+	Details any `json:"details,omitempty"`
 }
 
 func JSON(w http.ResponseWriter, status int, v any) {
@@ -45,6 +47,11 @@ func JSON(w http.ResponseWriter, status int, v any) {
 
 func Error(w http.ResponseWriter, status int, code, message string) {
 	JSON(w, status, ErrorBody{Error: ErrorDetail{Code: code, Message: message}})
+}
+
+// ErrorWithDetails standart hata gövdesine yapılandırılmış ayrıntı ekler.
+func ErrorWithDetails(w http.ResponseWriter, status int, code, message string, details any) {
+	JSON(w, status, ErrorBody{Error: ErrorDetail{Code: code, Message: message, Details: details}})
 }
 
 // ValidationError 422 döner; hangi alanın neden reddedildiği istemciye bildirilir.
@@ -81,4 +88,30 @@ func NotFound(w http.ResponseWriter, _ *http.Request) {
 
 func MethodNotAllowed(w http.ResponseWriter, _ *http.Request) {
 	Error(w, http.StatusMethodNotAllowed, CodeMethodInvalid, "bu uç nokta bu yöntemi desteklemiyor")
+}
+
+// IsUUID yol parametresi gibi dış girdinin UUID biçiminde olup olmadığını
+// denetler; bozuk kimlik veritabanına gitmeden 404/422 ile reddedilir.
+func IsUUID(s string) bool {
+	if len(s) != 36 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch i {
+		case 8, 13, 18, 23:
+			if c != '-' {
+				return false
+			}
+		default:
+			if !isHex(c) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func isHex(c byte) bool {
+	return '0' <= c && c <= '9' || 'a' <= c && c <= 'f' || 'A' <= c && c <= 'F'
 }
