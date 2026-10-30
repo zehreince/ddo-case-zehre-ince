@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: ÇarşıHub API
-  version: 0.3.0
+  version: 0.4.0
   description: |
     Tüm hatalar `{"error":{"code","message","fields?","details?"}}` biçimindedir.
     Para tutarları kuruş cinsinden tam sayıdır (`*_kurus`).
@@ -16,6 +16,9 @@ tags:
   - name: seller
   - name: cart
   - name: orders
+  - name: payments
+  - name: shipping
+  - name: ops
 paths:
   /health:
     get:
@@ -303,6 +306,126 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { description: "`invalid_state`" }
 
+  /api/v1/payments/callback:
+    post:
+      tags: [payments]
+      summary: Ödeme sağlayıcının sonuç bildirimi (webhook)
+      description: |
+        JWT değil HMAC-SHA256 imzasıyla yetkilendirilir (`X-Webhook-Timestamp`, `X-Webhook-Signature`;
+        imza `ts + "." + gövde` üzerinden, 5 dk tolerans). Tekrar gelen callback etkisizdir (`outcome: duplicate`).
+      security: [{ webhook: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [payment_id, status]
+              properties:
+                payment_id: { type: string, format: uuid }
+                status: { type: string, enum: [succeeded, failed] }
+                reason: { type: string }
+      responses:
+        "200":
+          description: "`outcome`: paid | failed | refunding | duplicate"
+        "401": { description: "`invalid_signature`" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/Validation" }
+  /api/v1/shipping/callback:
+    post:
+      tags: [shipping]
+      summary: Kargo firmasının takip olayı (webhook, HMAC)
+      description: "Aynı `event_id` ikinci kez gelirse `duplicate: true`. Durum yalnızca ileri gider."
+      security: [{ webhook: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ShipmentEvent" }
+      responses:
+        "200": { description: "`{\"duplicate\": bool}`" }
+        "401": { description: "`invalid_signature`" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/v1/carrier/shipments/{tracking}/events:
+    post:
+      tags: [shipping]
+      summary: Kargo entegrasyonu rolünün elle olay girişi
+      security: [{ bearer: [] }]
+      parameters:
+        - { name: tracking, in: path, required: true, schema: { type: string } }
+        - name: Idempotency-Key
+          in: header
+          required: true
+          description: Olay kimliği; aynı anahtar ikinci kez gelirse olay tekrar sayılmaz.
+          schema: { type: string, maxLength: 200 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { type: string, enum: [picked_up, in_transit, delivered] }
+                occurred_at: { type: string, format: date-time }
+      responses:
+        "200": { description: "`{\"duplicate\": bool}`" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/Validation" }
+  /api/v1/shipments/{tracking}:
+    get:
+      tags: [shipping]
+      summary: Kargo takibi (müşteri yalnızca kendi gönderisini)
+      security: [{ bearer: [] }]
+      parameters: [{ name: tracking, in: path, required: true, schema: { type: string } }]
+      responses:
+        "200":
+          description: Gönderi ve olay geçmişi
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tracking_number: { type: string }
+                  status: { type: string, enum: [requested, created, picked_up, in_transit, delivered, failed] }
+                  sub_order_id: { type: string, format: uuid }
+                  order_id: { type: string, format: uuid }
+                  delivered_at: { type: string, format: date-time, nullable: true }
+                  events:
+                    type: array
+                    items: { type: object, properties: { status: { type: string }, occurred_at: { type: string, format: date-time } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/v1/seller/notifications:
+    get:
+      tags: [seller]
+      summary: Satıcının bildirimleri (ödemesi alınan alt siparişler; keyset)
+      security: [{ bearer: [] }]
+      parameters:
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
+      responses:
+        "200": { description: Sayfa }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/v1/ops/outbox:
+    get:
+      tags: [ops]
+      summary: Outbox özeti (operasyon / yönetici)
+      description: Bekleyen, yeniden denenen ve bırakılmış olaylar; en son 20 sorunlu olay ve hata mesajları.
+      security: [{ bearer: [] }]
+      responses:
+        "200": { description: Özet }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/v1/ops/outbox/{id}/retry:
+    post:
+      tags: [ops]
+      summary: Bırakılmış (dead) olayı yeniden kuyruğa al
+      security: [{ bearer: [] }]
+      parameters: [{ name: id, in: path, required: true, schema: { type: integer } }]
+      responses:
+        "204": { description: Kuyruğa alındı }
+        "409": { description: "`invalid_state` — olay bırakılmış değil" }
+
 components:
   parameters:
     Id: { name: id, in: path, required: true, schema: { type: string, format: uuid } }
@@ -315,6 +438,11 @@ components:
       schema: { type: string, maxLength: 200 }
   securitySchemes:
     bearer: { type: http, scheme: bearer, bearerFormat: JWT }
+    webhook:
+      type: apiKey
+      in: header
+      name: X-Webhook-Signature
+      description: HMAC-SHA256(secret, X-Webhook-Timestamp + "." + gövde), hex
   responses:
     NotFound:
       description: "`not_found`"
@@ -422,6 +550,13 @@ components:
         discount_kurus: { type: integer }
         total_kurus: { type: integer }
         payment_deadline: { type: string, format: date-time }
+        payment:
+          type: object
+          properties:
+            id: { type: string, format: uuid }
+            status: { type: string, enum: [pending, requested, succeeded, failed, refund_requested, refunded, abandoned] }
+            failure_reason: { type: string }
+            callback_count: { type: integer }
         sub_orders:
           type: array
           items:
@@ -433,6 +568,11 @@ components:
               status: { type: string }
               total_kurus: { type: integer }
               items: { type: array, items: { type: object } }
+              shipment:
+                type: object
+                properties:
+                  tracking_number: { type: string }
+                  status: { type: string }
         unavailable_items:
           type: array
           items:
@@ -442,3 +582,11 @@ components:
               requested: { type: integer }
               available: { type: integer }
               reason: { type: string, enum: [insufficient_stock, offer_not_found] }
+    ShipmentEvent:
+      type: object
+      required: [event_id, tracking_number, status]
+      properties:
+        event_id: { type: string }
+        tracking_number: { type: string }
+        status: { type: string, enum: [picked_up, in_transit, delivered] }
+        occurred_at: { type: string, format: date-time }

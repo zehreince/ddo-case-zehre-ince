@@ -164,3 +164,69 @@ Authorization: Bearer {{seller.response.body.access_token}}
 Content-Type: application/json
 
 {"offer_id": "{{newProduct.response.body.variants[0].offers[0].id}}", "quantity": 1}
+
+# ── Ödeme ve kargo (F-4, F-6, T-2) ───────────────────────
+# Sipariş toplamının kuruş hanesi simülatörün davranışını seçer (TESTING.md):
+# ,01 ret · ,02 callback kaybolur · ,03 çift callback · ,04 askıda · ,05 başarılı
+
+### Fiyatı ,05 ile biten ürün (ödeme başarılı olacak)
+# @name sagaProduct
+POST {{v1}}/seller/products
+Authorization: Bearer {{seller.response.body.access_token}}
+Content-Type: application/json
+
+{"category_id": 1, "name": "Saga deneme", "variants": [{"sku": "SAGA-1", "price_kurus": 12305, "stock": 10}]}
+
+### Sipariş ver; ödeme ve kargo kendiliğinden ilerler
+# @name sagaOrder
+POST {{v1}}/orders
+Authorization: Bearer {{customer.response.body.access_token}}
+Content-Type: application/json
+Idempotency-Key: saga-ornek-1
+
+{"items": [{"offer_id": "{{sagaProduct.response.body.variants[0].offers[0].id}}", "quantity": 1}]}
+
+### Saga durumu: payment.status ve sub_orders[].shipment (birkaç saniyede bir tekrar çalıştırın)
+GET {{v1}}/orders/{{sagaOrder.response.body.id}}
+Authorization: Bearer {{customer.response.body.access_token}}
+
+### Kargo takibi (tracking_number'ı yukarıdaki yanıttan alın)
+GET {{v1}}/shipments/TRK0000000000
+Authorization: Bearer {{customer.response.body.access_token}}
+
+### Satıcı bildirimleri
+GET {{v1}}/seller/notifications
+Authorization: Bearer {{seller.response.body.access_token}}
+
+### Kargo entegrasyonu girişi
+# @name carrier
+POST {{v1}}/auth/login
+Content-Type: application/json
+
+{"email": "kargo@carsihub.test", "password": "Demo123!"}
+
+### Kargo rolü elle olay girer (Idempotency-Key = olay kimliği)
+POST {{v1}}/carrier/shipments/TRK0000000000/events
+Authorization: Bearer {{carrier.response.body.access_token}}
+Content-Type: application/json
+Idempotency-Key: elle-olay-1
+
+{"status": "in_transit"}
+
+### Operasyon girişi
+# @name ops
+POST {{v1}}/auth/login
+Content-Type: application/json
+
+{"email": "operasyon@carsihub.test", "password": "Demo123!"}
+
+### Outbox durumu (bekleyen / yeniden denenen / bırakılmış)
+GET {{v1}}/ops/outbox
+Authorization: Bearer {{ops.response.body.access_token}}
+
+### İmzasız ödeme callback'i → 401 invalid_signature
+# (Gerçek callback'ler simülatörden HMAC imzasıyla gelir; elle imzalamak gerekmez.)
+POST {{v1}}/payments/callback
+Content-Type: application/json
+
+{"payment_id": "00000000-0000-0000-0000-000000000000", "status": "succeeded"}

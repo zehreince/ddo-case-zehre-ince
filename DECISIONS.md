@@ -108,3 +108,36 @@ Her kayıt: bağlam, karar, düşünülen alternatifler, sonuçları.
 **Bilinen sınırlamalar.**
 - Tek bir çok satan ürün tek bir satıra yazıldığı için o satır seri hale gelir (ölçüm: 1.000 eşzamanlı sipariş ~2,5 sn). Gerekirse stok satıcı deposu başına parçalara bölünebilir.
 - Idempotency yanıtı işlem transaction'ından ayrı kaydedilir. İşlem commit olup yanıt kaydedilemeden süreç çökerse aynı anahtarla tekrar istek işlemi yeniden yapar. Pencere çok küçük; tam çözüm yanıtın işlemle aynı transaction'da yazılmasıdır.
+
+---
+
+## ADR-008: Saga — outbox ile olay güdümlü orkestrasyon, durum makinesiyle telafi
+
+**Bağlam.** Sipariş → stok → ödeme → satıcı bildirimi → kargo adımlarının her biri başarısız olabilir: sağlayıcı kapalı, ödeme zaman aşımı, çift callback, geç gelen sonuç, worker çökmesi. Hiçbir adım kaybolmamalı ya da iki kez etki etmemeli.
+
+**Karar.**
+- **Transactional outbox:** Her durum değişikliği, olayını aynı transaction'da `outbox_events`'e yazar. Broker yok; worker olayları veritabanından kiralar (`FOR UPDATE SKIP LOCKED` + `lease_until`) ve abone tüketicilere iletir. Başarısızlıkta üstel bekleme (1 sn → 5 dk), `OUTBOX_MAX_ATTEMPTS` sonra `dead` (operasyon `POST /ops/outbox/{id}/retry` ile geri alır).
+- **En az bir kez + idempotent tüketici:** Yerel etkili tüketiciler `outbox.Once` ile `(tüketici, olay)` kaydını kendi değişikliğiyle aynı transaction'da atar. Dış çağrı yapan tüketiciler (ödeme iste, iade, kargo oluştur) önce dış çağrıyı **idempotency anahtarıyla** yapar (ödeme kimliği, alt sipariş kimliği), sonra yerel durumu koşullu günceller (`WHERE status = 'pending'`).
+- **Orkestrasyon yeri:** Ayrı bir saga tablosu yerine sipariş ve ödeme satırlarının durum makineleri saga durumudur. Her adım, bir önceki adımın olayına abonedir (`order.placed → payment.request`, `order.paid → notification + shipping`, `payment.refund_requested → payment.refund`).
+- **Ödeme sonucu tek kapıdan:** Callback, mutabakat ve tekrarlar hepsi `ApplyResult`'tan geçer; sipariş → ödeme kilitleri altında son durum kontrol edilir. Çift callback ya da callback + mutabakat yarışı tek etki üretir (10 eşzamanlı callback testi).
+- **Telafiler:**
+  - ödeme reddi → sipariş iptal, stok iadesi (`FailPaymentTx`, aynı transaction)
+  - ödeme süresi doldu (`ORDER_PAYMENT_TTL`) → sipariş `expired`, stok iadesi
+  - kapanmış siparişe başarılı ödeme → `refund_requested` → sağlayıcıdan iade
+  - ödeme istenmeden sipariş kapandı → sağlayıcıya hiç gidilmez (`abandoned`)
+- **Ödeme zaman aşımı:** Sonucu `PAYMENT_RECONCILE_AFTER`'dan uzun süre gelmeyen ödemeler sağlayıcıya sorulur: sonuç varsa uygulanır; sağlayıcı ödemeyi tanımıyorsa yeniden istenir; sipariş kapanmışsa terk edilir.
+- **Küme içi sıra, kümeler arası paralellik:** Aynı siparişin olayları sırayla, farklı siparişler paralel (16) iletilir.
+- **Webhook güvenliği:** Callback'ler JWT değil HMAC-SHA256 + zaman damgası ile doğrulanır (5 dk tolerans, replay koruması).
+
+**Alternatifler.**
+- *Mesaj kuyruğu (Kafka/RabbitMQ):* Ek altyapı ve "DB'ye yazdım ama mesaj gitmedi" ikilisi yine outbox gerektirir. Bu ölçekte PostgreSQL kuyruk olarak yeterli; geçiş gerekirse yayımlayıcı olayları broker'a basacak şekilde değişir, yazma tarafı aynı kalır.
+- *Koreografi (her servis kendi olayına tepki verir, merkez yok):* Tek süreçte çalışan modüllerde akışı takip etmeyi zorlaştırıyor; telafi kararlarının (`ApplyResult`) tek yerde olması tercih edildi.
+- *Dış çağrıyı transaction içinde yapmak:* Yavaş sağlayıcı kilitleri ve bağlantıları tutar; çağrı sonrası commit başarısız olursa yine tutarsızlık. Dış çağrılar transaction dışında, idempotency anahtarıyla.
+- *2PC / dağıtık transaction:* Ödeme sağlayıcıları desteklemez.
+
+**Ölçülen bir sorun ve düzeltmesi.** İlk sürümde yayımlayıcı olayları sırayla işliyordu. Kaos testinde sağlayıcı kapalıyken her deneme DNS/zaman aşımı yüzünden 3–5 sn sürdü ve 5 olayın bir turu ~16 sn aldı: yavaş bir bağımlılık tüm kuyruğu (satıcı bildirimi, kargo) tıkıyordu. Olaylar kümeye göre gruplanıp paralel iletilecek şekilde değiştirildi; küme içi sıra `claim` sorgusundaki `NOT EXISTS` koşuluyla korunuyor (testli: 10 yavaş + 10 hızlı olay 0,44 sn).
+
+**Bilinen sınırlamalar.**
+- Devre kesici (circuit breaker) yok: sağlayıcı uzun süre kapalıysa her olay kendi denemesini yapar (üstel bekleme yükü sınırlar ama tek tek).
+- Kargo oluşturma kalıcı olarak başarısız olursa olay `dead` olur ve operasyon müdahalesi beklenir; otomatik kısmi iade yapılmaz (iş kararı gerektirir).
+- Simülatörün durumu bellektedir; yeniden başlarsa ödemeleri unutur. Bu bilerek bırakıldı: mutabakatın "sağlayıcı tanımıyor → yeniden iste" yolunu gerçekçi biçimde sınar.

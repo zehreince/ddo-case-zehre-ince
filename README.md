@@ -4,7 +4,7 @@
 
 Satıcıların ürün sattığı bir pazaryerinin sepet, stok, çok satıcılı sipariş bölme, ödeme, komisyon ve iade süreçlerini yöneten sistem.
 
-> Durum: kimlik doğrulama/RBAC, katalog ve satıcı bazlı stok (F-1), sepet (F-2), çok satıcılı sipariş (F-3) ve **T-1 stok rezervasyonu / oversell önleme** tamam. Sırada ödeme ve saga/outbox (F-4, T-2). Arayüzde şimdilik giriş ve yönetici ekranları var; katalog ve sepet ekranları sonraki adımda.
+> Durum: kimlik doğrulama/RBAC, katalog ve satıcı bazlı stok (F-1), sepet (F-2), çok satıcılı sipariş (F-3), ödeme (F-4), kargo takibi (F-6), **T-1 oversell önleme** ve **T-2 saga + outbox** tamam. Sırada kupon/fiyat motoru (T-3) ve hakediş defteri (F-5, T-4). Arayüzde şimdilik giriş ve yönetici ekranları var; katalog, sepet ve sipariş ekranları sonraki adımda.
 
 ## Kurulum
 
@@ -45,6 +45,7 @@ Seed her açılışta otomatik yüklenir. Hepsinin parolası **`Demo123!`**; gir
 | `make setup` | Git hook'larını açar: commit'te gofmt/vet, push'ta tüm testler |
 | `make up` | Derler, ayağa kaldırır, sağlıklı olana kadar bekler |
 | `make verify` | Tüm kontrolleri uçtan uca çalıştırır, PASS/FAIL tablosu basar |
+| `make chaos` | Ödeme sağlayıcıyı ve worker'ı durdurup sipariş akışının toparlandığını gösterir (T-2) |
 | `make reset-demo` | Veritabanını silip ilk seed haline döndürür |
 | `make test` | Backend + frontend birim testleri |
 | `make lint` | go vet, golangci-lint, TypeScript kontrolü |
@@ -52,15 +53,20 @@ Seed her açılışta otomatik yüklenir. Hepsinin parolası **`Demo123!`**; gir
 ## Mimari
 
 ```
-frontend (React, nginx :3000) ──► api (Go :8080) ──► PostgreSQL 16 ◄── worker (Go :8081)
-                                                          ▲            süresi dolan rezervasyon
-                              migrate (bir kez çalışır:   │            ve siparişleri süpürür
-                              şema + demo seed) ──────────┘
+                                         ┌──────────── callback (HMAC) ─────────────┐
+                                         ▼                                          │
+frontend (React :3000) ──► api (Go :8080) ──► PostgreSQL 16 ◄── worker (Go :8081)   │
+                                                 ▲   outbox      │ ödeme iste/iade, │
+                         migrate (bir kez:       │   olayları    │ kargo oluştur    │
+                         şema + demo seed) ──────┘               ▼                  │
+                                                         simulator (Go :8090) ──────┘
+                                                         ödeme sağlayıcı + kargo firması
 ```
 
 - **Backend:** Go, tek modül. Alan bazlı paketler (`internal/catalog`, `internal/order` …); her paketin içinde `domain → service → store → handler` katmanları. Ayrıntı: [DECISIONS.md](DECISIONS.md).
 - **Ortak altyapı:** `internal/platform` — config, JSON log, hata biçimi, middleware, veritabanı, metrikler.
-- **Komutlar:** `cmd/api`, `cmd/migrate`, `cmd/worker`, `cmd/verify` (ileride `cmd/simulator`). Hepsi tek imajda; compose hangisinin çalışacağını seçer.
+- **Komutlar:** `cmd/api`, `cmd/migrate`, `cmd/worker`, `cmd/simulator`, `cmd/verify`. Hepsi tek imajda; compose hangisinin çalışacağını seçer.
+- **Saga (T-2):** Durum değişikliği ve olayı aynı transaction'da outbox'a yazılır; worker en az bir kez iletir, tüketiciler idempotenttir. Ret, zaman aşımı, çift callback ve geç ödeme için telafiler var. Ayrıntı: [ADR-008](DECISIONS.md#adr-008-saga--outbox-ile-olay-güdümlü-orkestrasyon-durum-makinesiyle-telafi). Kanıt: `make chaos`.
 - **Stok (T-1):** Oversell tek bir koşullu `UPDATE` ile engellenir, sistem genelinde sabit kilit sırası deadlock'u önler. Ayrıntı ve elenen alternatifler: [ADR-007](DECISIONS.md#adr-007-stok-rezervasyonu--koşullu-update-ayrı-rezervasyon-tablosu-global-kilit-sırası).
 - **Frontend:** React + Vite + TypeScript.
 
