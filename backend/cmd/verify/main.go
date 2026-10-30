@@ -32,6 +32,7 @@ func allChecks() []check {
 	all = append(all, inventoryChecks...)
 	all = append(all, sagaChecks...)
 	all = append(all, couponChecks...)
+	all = append(all, ledgerChecks...)
 	return all
 }
 

@@ -163,37 +163,46 @@ var catalogChecks = []check{
 }
 
 // multiSellerVariant birden fazla satıcının teklif verdiği bir varyantın kimliğini döner.
+// Tüm sayfalara bakar: verify her çalıştırmada yeni ürün eklediği için seed ürünü ilk sayfadan kayabilir.
 func (c *client) multiSellerVariant(token string) (string, error) {
-	r, err := c.get("/api/v1/products?limit=100", token)
-	if err != nil {
-		return "", err
-	}
-	var list struct {
-		Items []struct {
-			ID         string `json:"id"`
-			OfferCount int    `json:"offer_count"`
-		} `json:"items"`
-	}
-	if err := r.decode(&list); err != nil {
-		return "", err
-	}
-	for _, it := range list.Items {
-		if it.OfferCount < 2 {
-			continue
-		}
-		r, err := c.get("/api/v1/products/"+it.ID, token)
+	cursor := ""
+	for range 100 {
+		r, err := c.get("/api/v1/products?limit=100"+cursor, token)
 		if err != nil {
 			return "", err
 		}
-		var p product
-		if err := r.decode(&p); err != nil {
+		var list struct {
+			Items []struct {
+				ID         string `json:"id"`
+				OfferCount int    `json:"offer_count"`
+			} `json:"items"`
+			NextCursor string `json:"next_cursor"`
+		}
+		if err := r.decode(&list); err != nil {
 			return "", err
 		}
-		for _, v := range p.Variants {
-			if len(v.Offers) >= 2 && v.Offers[0].SellerID != v.Offers[1].SellerID {
-				return v.SKU, nil
+		for _, it := range list.Items {
+			if it.OfferCount < 2 {
+				continue
+			}
+			r, err := c.get("/api/v1/products/"+it.ID, token)
+			if err != nil {
+				return "", err
+			}
+			var p product
+			if err := r.decode(&p); err != nil {
+				return "", err
+			}
+			for _, v := range p.Variants {
+				if len(v.Offers) >= 2 && v.Offers[0].SellerID != v.Offers[1].SellerID {
+					return v.SKU, nil
+				}
 			}
 		}
+		if list.NextCursor == "" {
+			break
+		}
+		cursor = "&cursor=" + list.NextCursor
 	}
 	return "", nil
 }

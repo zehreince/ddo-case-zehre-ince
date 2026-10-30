@@ -308,3 +308,85 @@ type info string
 func (i info) Error() string { return string(i) }
 
 func logf(format string, args ...any) error { return info(fmt.Sprintf(format, args...)) }
+
+var ledgerChecks = []check{
+	{"T-4", "teslimde hakediş tahakkuk eder: net = brüt - komisyon - kargo; mizan dengede", func(c *client) error {
+		seller, customer, err := sessions(c)
+		if err != nil {
+			return err
+		}
+		finance, err := c.loginAs(auth.RoleFinance)
+		if err != nil {
+			return err
+		}
+		id, _, err := c.placeAt(seller, customer, priceSuccess)
+		if err != nil {
+			return err
+		}
+		o, _, err := c.waitOrder(customer.AccessToken, id, 45*time.Second, func(o sagaOrder) bool {
+			return len(o.SubOrders) > 0 && o.SubOrders[0].Status == "delivered"
+		})
+		if err != nil {
+			return err
+		}
+		// Tahakkuk worker'da outbox ile gelir; kısa bir süre bekle.
+		var found bool
+		for range 20 {
+			r, err := c.get("/api/v1/seller/settlements", seller.AccessToken)
+			if err != nil {
+				return err
+			}
+			var s struct {
+				Items []struct {
+					GrossKurus       int64  `json:"gross_kurus"`
+					CommissionKurus  int64  `json:"commission_kurus"`
+					ShippingFeeKurus int64  `json:"shipping_fee_kurus"`
+					NetKurus         int64  `json:"net_kurus"`
+					SubOrderID       string `json:"sub_order_id"`
+				} `json:"items"`
+				PayableKurus int64 `json:"payable_kurus"`
+			}
+			if err := r.decode(&s); err != nil {
+				return err
+			}
+			for _, it := range s.Items {
+				if it.NetKurus != it.GrossKurus-it.CommissionKurus-it.ShippingFeeKurus {
+					return fmt.Errorf("net formülü tutmuyor: %+v", it)
+				}
+				if it.GrossKurus == priceSuccess && it.CommissionKurus > 0 {
+					found = true
+				}
+			}
+			if found {
+				break
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+		if !found {
+			return fmt.Errorf("teslim edilen sipariş için hakediş kalemi oluşmadı: %s", o)
+		}
+		r, err := c.get("/api/v1/finance/ledger/balances", finance.AccessToken)
+		if err != nil {
+			return err
+		}
+		var tb struct {
+			Balanced    bool  `json:"balanced"`
+			DebitTotal  int64 `json:"debit_total_kurus"`
+			CreditTotal int64 `json:"credit_total_kurus"`
+		}
+		if err := r.decode(&tb); err != nil {
+			return err
+		}
+		if !tb.Balanced || tb.DebitTotal == 0 {
+			return fmt.Errorf("mizan: borç=%d alacak=%d", tb.DebitTotal, tb.CreditTotal)
+		}
+		r, err = c.get("/api/v1/finance/ledger/balances", customer.AccessToken)
+		if err != nil {
+			return err
+		}
+		if err := r.expect(http.StatusForbidden, "forbidden"); err != nil {
+			return err
+		}
+		return logf("mizan borç = alacak = %d kuruş", tb.DebitTotal)
+	}},
+}
