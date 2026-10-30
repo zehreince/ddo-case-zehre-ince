@@ -54,5 +54,11 @@ func Run(ctx context.Context, pool *pgxpool.Pool, bcryptCost int, log *slog.Logg
 		return fmt.Errorf("demo katalog: %w", err)
 	}
 	log.Info("demo katalog hazır", "created_products", products, "total_products", len(demoProducts))
+
+	coupons, err := Coupons(ctx, pool)
+	if err != nil {
+		return fmt.Errorf("demo kuponlar: %w", err)
+	}
+	log.Info("demo kuponlar hazır", "created", coupons, "total", len(DemoCoupons))
 	return nil
 }
