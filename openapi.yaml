@@ -1,9 +1,10 @@
 openapi: 3.1.0
 info:
   title: ÇarşıHub API
-  version: 0.2.0
+  version: 0.3.0
   description: |
-    Tüm hatalar `{"error":{"code","message","fields?"}}` biçimindedir.
+    Tüm hatalar `{"error":{"code","message","fields?","details?"}}` biçimindedir.
+    Para tutarları kuruş cinsinden tam sayıdır (`*_kurus`).
     Korunan uçlar `Authorization: Bearer <access_token>` ister; yoksa 401, rol uygun değilse 403.
 servers:
   - url: http://localhost:8080
@@ -11,6 +12,10 @@ tags:
   - name: platform
   - name: auth
   - name: admin
+  - name: catalog
+  - name: seller
+  - name: cart
+  - name: orders
 paths:
   /health:
     get:
@@ -128,10 +133,195 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "422": { $ref: "#/components/responses/Validation" }
 
+  /api/v1/categories:
+    get:
+      tags: [catalog]
+      summary: Kategoriler
+      security: [{ bearer: [] }]
+      responses:
+        "200": { description: Kategori listesi }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /api/v1/products:
+    get:
+      tags: [catalog]
+      summary: Ürün listesi (en düşük fiyat, satılabilir stok; keyset)
+      security: [{ bearer: [] }]
+      parameters:
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
+      responses:
+        "200": { description: Sayfa }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /api/v1/products/{id}:
+    get:
+      tags: [catalog]
+      summary: Ürün, varyantları ve her varyantın satıcı teklifleri
+      security: [{ bearer: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200": { description: Ürün }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/v1/seller/products:
+    post:
+      tags: [seller]
+      summary: Satıcı ürün + varyant + kendi teklifini (fiyat, stok) ekler
+      security: [{ bearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateProduct" }
+      responses:
+        "201": { description: Oluşturulan ürün }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { description: "`duplicate_sku`" }
+        "422": { $ref: "#/components/responses/Validation" }
+  /api/v1/seller/offers:
+    get:
+      tags: [seller]
+      summary: Satıcının kendi teklifleri (stok, rezerve, satılabilir; keyset)
+      security: [{ bearer: [] }]
+      parameters:
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
+      responses:
+        "200": { description: Sayfa }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/v1/seller/offers/{id}/stock:
+    put:
+      tags: [seller]
+      summary: Eldeki stoğu ayarla (tutulan miktarın altına inemez)
+      security: [{ bearer: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [stock_on_hand]
+              properties: { stock_on_hand: { type: integer, minimum: 0 } }
+      responses:
+        "200": { description: Güncel teklif }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: "`below_reserved`" }
+  /api/v1/cart:
+    get:
+      tags: [cart]
+      summary: Sepet; her kalemde `reserved` ve `reserved_until`
+      security: [{ bearer: [] }]
+      responses:
+        "200": { description: Sepet }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/v1/cart/items:
+    post:
+      tags: [cart]
+      summary: Kalem ekle ya da adedini değiştir; stok RESERVATION_TTL boyunca tutulur
+      security: [{ bearer: [] }]
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Item" }
+      responses:
+        "200": { description: Güncel sepet }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/InsufficientStock" }
+        "422": { $ref: "#/components/responses/Validation" }
+  /api/v1/cart/items/{id}:
+    delete:
+      tags: [cart]
+      summary: Kalemi çıkar, stoğu bırak
+      security: [{ bearer: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200": { description: Güncel sepet }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/v1/cart/checkout:
+    post:
+      tags: [cart]
+      summary: Sepetten sipariş (satıcı başına alt sipariş); kısmi satış PARTIAL_FULFILLMENT'e göre
+      security: [{ bearer: [] }]
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      responses:
+        "201":
+          description: Sipariş (stoğu yetmeyen kalemler `unavailable_items` içinde)
+          content: { application/json: { schema: { $ref: "#/components/schemas/Order" } } }
+        "409": { description: "`insufficient_stock` ya da `cart_empty`" }
+  /api/v1/orders:
+    get:
+      tags: [orders]
+      summary: Müşterinin siparişleri (keyset)
+      security: [{ bearer: [] }]
+      parameters:
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
+      responses:
+        "200": { description: Sayfa }
+    post:
+      tags: [orders]
+      summary: Doğrudan sipariş ("hemen al")
+      security: [{ bearer: [] }]
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [items]
+              properties:
+                items: { type: array, maxItems: 50, items: { $ref: "#/components/schemas/Item" } }
+      responses:
+        "201":
+          description: Sipariş
+          content: { application/json: { schema: { $ref: "#/components/schemas/Order" } } }
+        "409": { $ref: "#/components/responses/InsufficientStock" }
+        "422": { $ref: "#/components/responses/Validation" }
+  /api/v1/orders/{id}:
+    get:
+      tags: [orders]
+      summary: Sipariş ayrıntısı (müşteri yalnızca kendi siparişini; operasyon/yönetici hepsini)
+      security: [{ bearer: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200":
+          description: Sipariş
+          content: { application/json: { schema: { $ref: "#/components/schemas/Order" } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/v1/orders/{id}/cancel:
+    post:
+      tags: [orders]
+      summary: Ödeme bekleyen siparişi iptal et; stok iade edilir
+      security: [{ bearer: [] }]
+      parameters:
+        - { $ref: "#/components/parameters/Id" }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      responses:
+        "200": { description: İptal edilmiş sipariş }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: "`invalid_state`" }
+
 components:
+  parameters:
+    Id: { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    Limit: { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 20 } }
+    Cursor: { name: cursor, in: query, schema: { type: string } }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      description: Aynı anahtarla tekrar istek işlemi yeniden yapmaz, ilk yanıtı döner (`Idempotent-Replayed` başlığı). Farklı gövdeyle 422 `idempotency_key_reused`.
+      schema: { type: string, maxLength: 200 }
   securitySchemes:
     bearer: { type: http, scheme: bearer, bearerFormat: JWT }
   responses:
+    NotFound:
+      description: "`not_found`"
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    InsufficientStock:
+      description: "`insufficient_stock` — `error.details.unavailable_items`: her kalem için istenen, satılabilir miktar ve neden"
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
     BadRequest:
       description: "`bad_request` — gövde geçerli JSON değil ya da bilinmeyen alan içeriyor"
       content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
@@ -164,6 +354,7 @@ components:
             fields:
               type: object
               additionalProperties: { type: string }
+            details: { type: object }
     Role:
       type: string
       enum: [customer, seller, operations, finance, carrier, admin]
@@ -196,3 +387,58 @@ components:
         expires_in: { type: integer, description: Saniye }
         refresh_token: { type: string }
         user: { $ref: "#/components/schemas/User" }
+    Item:
+      type: object
+      required: [offer_id, quantity]
+      properties:
+        offer_id: { type: string, format: uuid }
+        quantity: { type: integer, minimum: 1, maximum: 100 }
+    CreateProduct:
+      type: object
+      required: [category_id, name, variants]
+      properties:
+        category_id: { type: integer }
+        name: { type: string, maxLength: 300 }
+        description: { type: string }
+        attributes: { type: object, additionalProperties: { type: string } }
+        variants:
+          type: array
+          minItems: 1
+          maxItems: 20
+          items:
+            type: object
+            required: [sku, price_kurus, stock]
+            properties:
+              sku: { type: string, pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{1,63}$" }
+              attributes: { type: object, additionalProperties: { type: string } }
+              price_kurus: { type: integer, minimum: 1, description: Kuruş }
+              stock: { type: integer, minimum: 0 }
+    Order:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        status: { type: string, enum: [pending_payment, paid, cancelled, expired] }
+        subtotal_kurus: { type: integer }
+        discount_kurus: { type: integer }
+        total_kurus: { type: integer }
+        payment_deadline: { type: string, format: date-time }
+        sub_orders:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: string, format: uuid }
+              seller_id: { type: string, format: uuid }
+              seller_name: { type: string }
+              status: { type: string }
+              total_kurus: { type: integer }
+              items: { type: array, items: { type: object } }
+        unavailable_items:
+          type: array
+          items:
+            type: object
+            properties:
+              offer_id: { type: string }
+              requested: { type: integer }
+              available: { type: integer }
+              reason: { type: string, enum: [insufficient_stock, offer_not_found] }

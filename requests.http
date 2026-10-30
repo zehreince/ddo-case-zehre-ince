@@ -68,3 +68,99 @@ Authorization: Bearer {{admin.response.body.access_token}}
 ### Müşteri yönetici ucuna → 403
 GET {{v1}}/admin/users
 Authorization: Bearer {{customer.response.body.access_token}}
+
+# ── Katalog ve stok (F-1, F-2, F-3, T-1) ─────────────────
+
+### Satıcı girişi
+# @name seller
+POST {{v1}}/auth/login
+Content-Type: application/json
+
+{"email": "satici@carsihub.test", "password": "Demo123!"}
+
+### Kategoriler
+GET {{v1}}/categories
+Authorization: Bearer {{customer.response.body.access_token}}
+
+### Ürün listesi (en düşük fiyat + satılabilir stok)
+GET {{v1}}/products?limit=20
+Authorization: Bearer {{customer.response.body.access_token}}
+
+### Satıcı ürün ekler (varyant + kendi fiyatı + stoğu). SKU'yu her denemede değiştirin.
+# @name newProduct
+POST {{v1}}/seller/products
+Authorization: Bearer {{seller.response.body.access_token}}
+Content-Type: application/json
+
+{
+  "category_id": 1,
+  "name": "Keten Gömlek",
+  "description": "Yazlık",
+  "variants": [
+    {"sku": "GMLK-KTN-M-1", "attributes": {"beden": "M"}, "price_kurus": 59990, "stock": 5},
+    {"sku": "GMLK-KTN-L-1", "attributes": {"beden": "L"}, "price_kurus": 59990, "stock": 1}
+  ]
+}
+
+### Ürün ayrıntısı: varyantlar ve satıcı teklifleri
+GET {{v1}}/products/{{newProduct.response.body.id}}
+Authorization: Bearer {{customer.response.body.access_token}}
+
+### Satıcının kendi teklifleri (stok / rezerve / satılabilir)
+GET {{v1}}/seller/offers?limit=20
+Authorization: Bearer {{seller.response.body.access_token}}
+
+### Stok güncelle (tutulan miktarın altına inemez → 409 below_reserved)
+PUT {{v1}}/seller/offers/{{newProduct.response.body.variants[0].offers[0].id}}/stock
+Authorization: Bearer {{seller.response.body.access_token}}
+Content-Type: application/json
+
+{"stock_on_hand": 8}
+
+### Sepete ekle (stok RESERVATION_TTL boyunca tutulur). Aynı Idempotency-Key ile tekrar → aynı yanıt
+POST {{v1}}/cart/items
+Authorization: Bearer {{customer.response.body.access_token}}
+Content-Type: application/json
+Idempotency-Key: sepet-ornek-1
+
+{"offer_id": "{{newProduct.response.body.variants[0].offers[0].id}}", "quantity": 2}
+
+### Sepet (reserved_until: stoğun ne zamana kadar tutulduğu)
+GET {{v1}}/cart
+Authorization: Bearer {{customer.response.body.access_token}}
+
+### Sepetten sipariş: satıcı başına alt sipariş
+# @name checkout
+POST {{v1}}/cart/checkout
+Authorization: Bearer {{customer.response.body.access_token}}
+Idempotency-Key: odeme-ornek-1
+
+### Doğrudan sipariş; stok yetmezse 409 insufficient_stock + unavailable_items
+POST {{v1}}/orders
+Authorization: Bearer {{customer.response.body.access_token}}
+Content-Type: application/json
+Idempotency-Key: siparis-ornek-1
+
+{"items": [
+  {"offer_id": "{{newProduct.response.body.variants[0].offers[0].id}}", "quantity": 1},
+  {"offer_id": "{{newProduct.response.body.variants[1].offers[0].id}}", "quantity": 5}
+]}
+
+### Siparişlerim
+GET {{v1}}/orders
+Authorization: Bearer {{customer.response.body.access_token}}
+
+### Sipariş ayrıntısı
+GET {{v1}}/orders/{{checkout.response.body.id}}
+Authorization: Bearer {{customer.response.body.access_token}}
+
+### İptal (yalnızca ödeme bekleyen; stok iade edilir)
+POST {{v1}}/orders/{{checkout.response.body.id}}/cancel
+Authorization: Bearer {{customer.response.body.access_token}}
+
+### Satıcı sepete ekleyemez → 403
+POST {{v1}}/cart/items
+Authorization: Bearer {{seller.response.body.access_token}}
+Content-Type: application/json
+
+{"offer_id": "{{newProduct.response.body.variants[0].offers[0].id}}", "quantity": 1}

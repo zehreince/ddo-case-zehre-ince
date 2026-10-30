@@ -82,3 +82,29 @@ Her kayıt: bağlam, karar, düşünülen alternatifler, sonuçları.
 - *Refresh token'ı localStorage'da tutmak:* XSS ile okunabilir.
 
 **Bilinen sınırlama.** Rol değişikliği ya da hesap kapatma, access token'ın süresi dolana kadar (en fazla 15 dk) yansımaz; refresh anında yansır. Giriş denemelerine hız sınırı yok; üretimde IP + hesap bazlı sınırlama eklenmeli.
+
+---
+
+## ADR-007: Stok rezervasyonu — koşullu UPDATE, ayrı rezervasyon tablosu, global kilit sırası
+
+**Bağlam.** Aynı varyanta 1.000 eşzamanlı sipariş stoktan fazla satılamamalı (T-1). Sepet stok tutmalı (TTL), ödeme başarısızsa stok dönmeli, çok satıcılı sepette kısmi satış kuralı açık olmalı.
+
+**Karar.**
+- **Stok modeli:** `offers` satırında `stock_on_hand` ve `stock_reserved`. Satılabilir = fark. Her tutma `stock_reservations` tablosunda ayrı bir satır (`active → committed | released | expired`); `stock_reserved` her zaman aktif rezervasyonların toplamıdır (testlerde ayrıca kontrol ediliyor).
+- **Oversell önleme:** Tek koşullu `UPDATE offers SET stock_reserved = stock_reserved + q WHERE id = $1 AND stock_on_hand - stock_reserved >= q`. PostgreSQL bekleyen işlemin `WHERE` koşulunu kilidi aldıktan sonra güncel satırda yeniden değerlendirir; READ COMMITTED yeterli. Son savunma hattı olarak `CHECK (stock_reserved <= stock_on_hand)`.
+- **Kilit sırası:** Sistem genelinde `orders → offers (id sırasıyla) → stock_reservations`. Birden çok teklife dokunan her işlem önce `LockOffers` ile teklifleri sıralı kilitler. Testle kanıtlı: aynı iki ürünü ters sırada isteyen 100 eşzamanlı işlem deadlock'a girmiyor.
+- **TTL:** Sepet rezervasyonu `RESERVATION_TTL`, siparişinki `ORDER_PAYMENT_TTL`. Ayrı `worker` servisi süresi dolanları partiler halinde bırakır. Ödenmemiş siparişler `FOR UPDATE SKIP LOCKED` ile seçilir (o anda ödeme sonucu işlenen sipariş beklenmez).
+- **Sepetten ödemeye:** Sepet rezervasyonları bırakılır ve aynı transaction içinde sipariş için yeniden alınır; teklif kilitleri baştan alındığı için arada stok kaybedilmez. Hata olursa her şey geri alınır, sepet olduğu gibi kalır.
+- **Kısmi satış (`PARTIAL_FULFILLMENT`):** `allow` (varsayılan) → stoğu olan kalemler satılır, olmayanlar `unavailable_items` olarak döner ve sepette kalır; hiçbiri yoksa sipariş oluşmaz. `reject` → tek kalem bile yetmezse hiçbir şey rezerve edilmez. Her kalem kendi savepoint'inde denenir; böylece tüm başarısız kalemler tek seferde raporlanır.
+- **Idempotency:** Sipariş, sepete ekleme ve ödeme adımı `Idempotency-Key` destekler; anahtar kullanıcı başına, istek özeti (yöntem + yol + gövde) ile saklanır.
+
+**Alternatifler.**
+- *`SELECT … FOR UPDATE` + uygulamada kontrol + `UPDATE`:* Doğru ama iki gidiş-dönüş; koşullu `UPDATE` aynı garantiyi tek ifadede verir.
+- *`SERIALIZABLE` + yeniden deneme:* Sıcak üründe (kampanya anı) çakışma oranı çok yüksek olur, yeniden denemeler yükü katlar.
+- *Redis'te sayaç (DECR):* Hızlı ama stok ile sipariş iki ayrı sistemde olur; tutarlılık için ayrıca telafi gerekir. Ek bağımlılık getirmeye değmedi.
+- *Stoğu doğrudan düşmek (rezervasyon tablosu olmadan):* TTL, iade ve "hangi sipariş neyi tutuyor" sorusu cevapsız kalır.
+- *Süpürücüde rezervasyonları önce `FOR UPDATE SKIP LOCKED` ile kilitlemek:* İlk tasarım buydu; sepet işlemleriyle ters sırada kilit almak demekti (rezervasyon → teklif vs. teklif → rezervasyon) ve deadlock'a açıktı. Adaylar kilitsiz seçilip global sırayla kilitleniyor, durum kilit altında yeniden kontrol ediliyor.
+
+**Bilinen sınırlamalar.**
+- Tek bir çok satan ürün tek bir satıra yazıldığı için o satır seri hale gelir (ölçüm: 1.000 eşzamanlı sipariş ~2,5 sn). Gerekirse stok satıcı deposu başına parçalara bölünebilir.
+- Idempotency yanıtı işlem transaction'ından ayrı kaydedilir. İşlem commit olup yanıt kaydedilemeden süreç çökerse aynı anahtarla tekrar istek işlemi yeniden yapar. Pencere çok küçük; tam çözüm yanıtın işlemle aynı transaction'da yazılmasıdır.
