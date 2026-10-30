@@ -16,8 +16,13 @@ import (
 	"time"
 
 	"carsihub/internal/auth"
+	"carsihub/internal/cart"
+	"carsihub/internal/catalog"
+	"carsihub/internal/inventory"
+	"carsihub/internal/order"
 	"carsihub/internal/platform/config"
 	"carsihub/internal/platform/db"
+	"carsihub/internal/platform/idempotency"
 	"carsihub/internal/platform/logx"
 	"carsihub/internal/platform/metrics"
 	"carsihub/internal/server"
@@ -51,12 +56,25 @@ func run(cfg config.Config, log *slog.Logger) error {
 	}
 	defer pool.Close()
 
+	policy, err := inventory.ParsePolicy(cfg.PartialFulfillment)
+	if err != nil {
+		return err
+	}
 	tokens := auth.NewTokens(cfg.JWTSecret, cfg.AccessTTL)
-	authHandler := auth.NewHandler(auth.NewService(pool, tokens, cfg.RefreshTTL), tokens, log, cfg.CookieSecure)
+	idem := idempotency.Middleware(pool, func(ctx context.Context) (string, bool) {
+		p, ok := auth.PrincipalFrom(ctx)
+		return p.UserID, ok
+	}, log)
+	orders := order.NewService(pool, policy, cfg.PaymentTTL)
 
 	router := server.NewRouter(server.Deps{
 		Config: cfg, Log: log, DB: pool, Metrics: metrics.New(),
-		Modules: []server.Module{authHandler},
+		Modules: []server.Module{
+			auth.NewHandler(auth.NewService(pool, tokens, cfg.RefreshTTL), tokens, log, cfg.CookieSecure),
+			catalog.NewHandler(catalog.NewService(pool), tokens, log),
+			cart.NewHandler(cart.NewService(pool, orders, cfg.ReservationTTL), tokens, idem, log),
+			order.NewHandler(orders, tokens, idem, log),
+		},
 	})
 
 	srv := &http.Server{
