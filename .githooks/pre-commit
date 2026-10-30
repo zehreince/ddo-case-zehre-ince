@@ -1,0 +1,15 @@
+#!/bin/sh
+# Hızlı kontroller: commit'i birkaç saniyeden fazla bekletmemeli.
+set -e
+cd "$(git rev-parse --show-toplevel)"
+
+if git diff --cached --name-only | grep -q '^backend/.*\.go$'; then
+  unformatted=$(cd backend && gofmt -l .)
+  if [ -n "$unformatted" ]; then
+    echo "gofmt gerekli:" >&2
+    echo "$unformatted" >&2
+    echo "düzeltmek için: cd backend && gofmt -w ." >&2
+    exit 1
+  fi
+  (cd backend && go vet ./...)
+fi

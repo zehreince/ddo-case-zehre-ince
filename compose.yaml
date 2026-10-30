@@ -51,6 +51,7 @@ services:
       context: ./frontend
       args:
         VITE_API_URL: ${VITE_API_URL}
+    image: carsihub-frontend:local
     ports:
       - "3000:8080"
     depends_on:
