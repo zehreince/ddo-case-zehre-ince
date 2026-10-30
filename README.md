@@ -4,14 +4,14 @@
 
 Satıcıların ürün sattığı bir pazaryerinin sepet, stok, çok satıcılı sipariş bölme, ödeme, komisyon ve iade süreçlerini yöneten sistem.
 
-> Durum: iskelet aşaması. Çalışanlar: compose, migrasyon, `/health`, `/metrics`, `make verify` altyapısı, CI.
+> Durum: kimlik doğrulama ve RBAC tamam (6 rol, JWT + refresh rotasyonu). Sırada katalog ve stok (F-1, T-1).
 
 ## Kurulum
 
 Gereksinim: Docker + Docker Compose.
 
 ```bash
-git clone <repo-adresi> && cd ddo-case-zehre-ince
+git clone https://github.com/zehreince/ddo-case-zehre-ince.git && cd ddo-case-zehre-ince
 cp .env.example .env
 docker compose up --build
 ```
@@ -24,6 +24,19 @@ docker compose up --build
 | Metrikler | http://localhost:8080/metrics |
 
 Veritabanı host'a açılmaz, yalnızca compose ağı içinden erişilir.
+
+### Demo hesapları
+
+Seed her açılışta otomatik yüklenir. Hepsinin parolası **`Demo123!`**; giriş ekranındaki "Demo hesapları" düğmeleri formu doldurur.
+
+| Rol | E-posta |
+|---|---|
+| Müşteri | `musteri@carsihub.test` |
+| Satıcı | `satici@carsihub.test` |
+| Pazaryeri operasyon | `operasyon@carsihub.test` |
+| Finans | `finans@carsihub.test` |
+| Kargo entegrasyonu | `kargo@carsihub.test` |
+| Yönetici | `yonetici@carsihub.test` |
 
 ### Sık kullanılan komutlar
 

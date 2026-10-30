@@ -62,3 +62,23 @@ Her kayıt: bağlam, karar, düşünülen alternatifler, sonuçları.
 **Alternatifler.** Komut başına ayrı imaj: aynı bağımlılıklar birkaç kez derlenir, soğuk makinede açılış süresi uzar. Alpine + curl: daha büyük imaj, gereksiz saldırı yüzeyi.
 
 **Sonuç.** Tek derleme, küçük imaj; yeni bir komut eklemek Dockerfile değişikliği gerektirmez.
+
+---
+
+## ADR-006: Kısa ömürlü JWT + tek kullanımlık, aile bazlı refresh token
+
+**Bağlam.** Her uçta rol kontrolü gerekiyor; oturum hem tarayıcıdan hem `verify`/`requests.http` gibi API istemcilerinden açılıyor. Çalınan bir token'ın etkisi sınırlı olmalı.
+
+**Karar.**
+- **Access token:** HS256 JWT, 15 dk. Durumsuz; her istekte veritabanına gitmeden rol okunur. Yalnızca HS256 kabul edilir (`alg=none` ve algoritma değiştirme saldırıları reddedilir).
+- **Refresh token:** 32 bayt rastgele, opak. Veritabanında yalnızca SHA-256 özeti tutulur. Her kullanımda yenisiyle değiştirilir (rotation). Aynı oturumdan türeyen token'lar bir `family_id` paylaşır; **iptal edilmiş bir token tekrar gelirse aile tamamen iptal edilir** ve olay audit'e yazılır.
+- **Yarış:** Aynı refresh token'la eşzamanlı istekler `SELECT … FOR UPDATE` ile sıraya girer; yalnızca biri döndürme yapar. Testle kanıtlı (10 eşzamanlı istek → tam 1 başarı).
+- **Tarayıcı:** Access token yalnızca bellekte. Refresh token `httpOnly; SameSite=Strict; Path=/api/v1/auth` çerezde, JavaScript okuyamaz. Sayfa yenilenince oturum çerezle sessizce geri gelir. API istemcileri aynı token'ı gövdeden gönderebilir.
+- **Kullanıcı sayımı:** Bilinmeyen e-posta, yanlış parola ve kapalı hesap aynı 401'i döner; bilinmeyen e-postada da bcrypt karşılaştırması yapılır ki yanıt süresi bir şey sızdırmasın.
+
+**Alternatifler.**
+- *Sunucu taraflı oturum (session tablosu):* Her istekte veritabanı okuması gerekir; anında iptal kolaylaşır. Kampanya anı yükünde (Bölüm 8) her isteğe bir sorgu eklememek için reddedildi.
+- *Uzun ömürlü tek JWT:* İptal edilemez; çalınırsa süresi dolana kadar geçerli.
+- *Refresh token'ı localStorage'da tutmak:* XSS ile okunabilir.
+
+**Bilinen sınırlama.** Rol değişikliği ya da hesap kapatma, access token'ın süresi dolana kadar (en fazla 15 dk) yansımaz; refresh anında yansır. Giriş denemelerine hız sınırı yok; üretimde IP + hesap bazlı sınırlama eklenmeli.

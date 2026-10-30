@@ -1,5 +1,7 @@
 # VS Code REST Client koleksiyonu. Önce: docker compose up --build
+# Demo hesapları ve parolalar: TESTING.md
 @api = http://localhost:8080
+@v1 = {{api}}/api/v1
 
 ### Sağlık
 GET {{api}}/health
@@ -8,4 +10,61 @@ GET {{api}}/health
 GET {{api}}/metrics
 
 ### Bilinmeyen uç → standart hata gövdesi
-GET {{api}}/api/v1/olmayan-uc
+GET {{v1}}/olmayan-uc
+
+# ── Kimlik doğrulama ─────────────────────────────────────
+
+### Yönetici girişi
+# @name admin
+POST {{v1}}/auth/login
+Content-Type: application/json
+
+{"email": "yonetici@carsihub.test", "password": "Demo123!"}
+
+### Müşteri girişi
+# @name customer
+POST {{v1}}/auth/login
+Content-Type: application/json
+
+{"email": "musteri@carsihub.test", "password": "Demo123!"}
+
+### Yanlış parola → 401 invalid_credentials
+POST {{v1}}/auth/login
+Content-Type: application/json
+
+{"email": "musteri@carsihub.test", "password": "yanlis"}
+
+### Geçersiz girdi → 422, alan bazlı hata
+POST {{v1}}/auth/login
+Content-Type: application/json
+
+{"email": "bozuk", "password": ""}
+
+### Oturum sahibi
+GET {{v1}}/auth/me
+Authorization: Bearer {{admin.response.body.access_token}}
+
+### Token'sız → 401
+GET {{v1}}/auth/me
+
+### Refresh token döndürme (ikinci kez çalıştırınca 401 token_reused)
+POST {{v1}}/auth/refresh
+Content-Type: application/json
+
+{"refresh_token": "{{customer.response.body.refresh_token}}"}
+
+### Çıkış
+POST {{v1}}/auth/logout
+Content-Type: application/json
+
+{"refresh_token": "{{admin.response.body.refresh_token}}"}
+
+# ── Yönetici ─────────────────────────────────────────────
+
+### Kullanıcı listesi (keyset sayfalama; next_cursor ile devam)
+GET {{v1}}/admin/users?limit=2
+Authorization: Bearer {{admin.response.body.access_token}}
+
+### Müşteri yönetici ucuna → 403
+GET {{v1}}/admin/users
+Authorization: Bearer {{customer.response.body.access_token}}

@@ -1,12 +1,20 @@
 openapi: 3.1.0
 info:
   title: ÇarşıHub API
-  version: 0.1.0
+  version: 0.2.0
+  description: |
+    Tüm hatalar `{"error":{"code","message","fields?"}}` biçimindedir.
+    Korunan uçlar `Authorization: Bearer <access_token>` ister; yoksa 401, rol uygun değilse 403.
 servers:
   - url: http://localhost:8080
+tags:
+  - name: platform
+  - name: auth
+  - name: admin
 paths:
   /health:
     get:
+      tags: [platform]
       summary: Servis ve veritabanı sağlık durumu
       responses:
         "200":
@@ -21,13 +29,121 @@ paths:
               schema: { $ref: "#/components/schemas/Health" }
   /metrics:
     get:
+      tags: [platform]
       summary: Prometheus formatında metrikler
       responses:
         "200":
           description: Metin biçiminde metrikler
           content:
             text/plain: {}
+
+  /api/v1/auth/login:
+    post:
+      tags: [auth]
+      summary: E-posta ve parolayla giriş
+      description: Refresh token hem gövdede hem `carsihub_refresh` httpOnly çerezinde döner.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LoginRequest" }
+      responses:
+        "200":
+          description: Oturum açıldı
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Session" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401":
+          description: "`invalid_credentials` — e-posta ya da parola hatalı (bilinmeyen e-postayla aynı yanıt)"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "422": { $ref: "#/components/responses/Validation" }
+  /api/v1/auth/refresh:
+    post:
+      tags: [auth]
+      summary: Refresh token ile yeni oturum (token rotasyonu)
+      description: |
+        Token gövdeden ya da çerezden okunur. Her refresh token tek kullanımlıktır.
+        İptal edilmiş bir token yeniden kullanılırsa oturum ailesinin tamamı iptal edilir (`token_reused`).
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RefreshRequest" }
+      responses:
+        "200":
+          description: Yeni oturum
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Session" }
+        "401":
+          description: "`unauthorized` (geçersiz/süresi dolmuş) ya da `token_reused`"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /api/v1/auth/logout:
+    post:
+      tags: [auth]
+      summary: Oturumu sonlandır (idempotent)
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RefreshRequest" }
+      responses:
+        "204": { description: Oturum kapatıldı, çerez silindi }
+  /api/v1/auth/me:
+    get:
+      tags: [auth]
+      summary: Oturum sahibi
+      security: [{ bearer: [] }]
+      responses:
+        "200":
+          description: Kullanıcı
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/admin/users:
+    get:
+      tags: [admin]
+      summary: Kullanıcı listesi (yalnızca yönetici, keyset sayfalama)
+      security: [{ bearer: [] }]
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 20 } }
+        - { name: cursor, in: query, description: Önceki sayfanın next_cursor değeri, schema: { type: string } }
+      responses:
+        "200":
+          description: Sayfa
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/User" } }
+                  next_cursor: { type: string, description: Yoksa son sayfadır }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/Validation" }
+
 components:
+  securitySchemes:
+    bearer: { type: http, scheme: bearer, bearerFormat: JWT }
+  responses:
+    BadRequest:
+      description: "`bad_request` — gövde geçerli JSON değil ya da bilinmeyen alan içeriyor"
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    Unauthorized:
+      description: "`unauthorized` — token yok ya da geçersiz"
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    Forbidden:
+      description: "`forbidden` — rol bu işlem için yetkili değil"
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    Validation:
+      description: "`validation_failed` — `fields` alan bazlı hataları içerir"
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
   schemas:
     Health:
       type: object
@@ -45,3 +161,38 @@ components:
           properties:
             code: { type: string, example: not_found }
             message: { type: string }
+            fields:
+              type: object
+              additionalProperties: { type: string }
+    Role:
+      type: string
+      enum: [customer, seller, operations, finance, carrier, admin]
+    User:
+      type: object
+      required: [id, email, full_name, role]
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string, format: email }
+        full_name: { type: string }
+        role: { $ref: "#/components/schemas/Role" }
+    LoginRequest:
+      type: object
+      required: [email, password]
+      additionalProperties: false
+      properties:
+        email: { type: string, format: email }
+        password: { type: string, maxLength: 72 }
+    RefreshRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        refresh_token: { type: string, description: Yoksa çerez kullanılır }
+    Session:
+      type: object
+      required: [access_token, token_type, expires_in, refresh_token, user]
+      properties:
+        access_token: { type: string }
+        token_type: { type: string, enum: [Bearer] }
+        expires_in: { type: integer, description: Saniye }
+        refresh_token: { type: string }
+        user: { $ref: "#/components/schemas/User" }
