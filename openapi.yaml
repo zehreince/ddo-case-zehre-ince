@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: ÇarşıHub API
-  version: 0.4.0
+  version: 0.5.0
   description: |
     Tüm hatalar `{"error":{"code","message","fields?","details?"}}` biçimindedir.
     Para tutarları kuruş cinsinden tam sayıdır (`*_kurus`).
@@ -19,6 +19,7 @@ tags:
   - name: payments
   - name: shipping
   - name: ops
+  - name: coupons
 paths:
   /health:
     get:
@@ -426,6 +427,93 @@ paths:
         "204": { description: Kuyruğa alındı }
         "409": { description: "`invalid_state` — olay bırakılmış değil" }
 
+  /api/v1/coupons:
+    post:
+      tags: [coupons]
+      summary: Kupon oluştur (yönetici/operasyon → pazaryeri, satıcı → kendi mağazası)
+      security: [{ bearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateCoupon" }
+      responses:
+        "201": { description: Kupon }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { description: "`duplicate_code`" }
+        "422": { $ref: "#/components/responses/Validation" }
+    get:
+      tags: [coupons]
+      summary: Kuponlar (satıcı yalnızca kendininkileri; keyset)
+      security: [{ bearer: [] }]
+      parameters:
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
+      responses:
+        "200": { description: Sayfa }
+  /api/v1/cart/coupons:
+    post:
+      tags: [cart]
+      summary: Sepete kupon ekle
+      security: [{ bearer: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [code], properties: { code: { type: string } } }
+      responses:
+        "200": { description: "Güncel sepet; `applied_coupons`, `rejected_coupons`, satır indirimleri" }
+        "404": { description: "`coupon_not_found`" }
+        "409": { description: "`too_many_coupons`" }
+        "422": { description: "`coupon_expired` / `coupon_not_started`" }
+  /api/v1/cart/coupons/{code}:
+    delete:
+      tags: [cart]
+      summary: Kuponu sepetten çıkar
+      security: [{ bearer: [] }]
+      parameters: [{ name: code, in: path, required: true, schema: { type: string } }]
+      responses:
+        "200": { description: Güncel sepet }
+  /api/v1/orders/{id}/refund-quote:
+    post:
+      tags: [orders]
+      summary: Kısmi iade önizlemesi (kupon geri hesabıyla); bir şey değiştirmez
+      security: [{ bearer: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [items]
+              properties:
+                items:
+                  type: array
+                  items:
+                    type: object
+                    required: [order_item_id, quantity]
+                    properties:
+                      order_item_id: { type: string, format: uuid }
+                      quantity: { type: integer, minimum: 1 }
+      responses:
+        "200":
+          description: İade hesabı
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  refund_kurus: { type: integer }
+                  paid_before_kurus: { type: integer }
+                  paid_after_kurus: { type: integer }
+                  clawback_kurus: { type: integer, description: İade edilen kalemlerin ödenmiş payından kupon kaybı nedeniyle kesilen }
+                  lost_coupons: { type: array, items: { type: string } }
+                  by_seller: { type: object, additionalProperties: { type: object } }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: "`invalid_state` — sipariş ödenmemiş" }
+        "422": { $ref: "#/components/responses/Validation" }
+
 components:
   parameters:
     Id: { name: id, in: path, required: true, schema: { type: string, format: uuid } }
@@ -590,3 +678,18 @@ components:
         tracking_number: { type: string }
         status: { type: string, enum: [picked_up, in_transit, delivered] }
         occurred_at: { type: string, format: date-time }
+    CreateCoupon:
+      type: object
+      required: [code, kind, value]
+      properties:
+        code: { type: string, pattern: "^[A-Za-z0-9_-]{3,32}$", description: Büyük harfe çevrilir }
+        kind: { type: string, enum: [percent, fixed] }
+        value: { type: integer, description: "percent: baz puan (1000 = %10), fixed: kuruş" }
+        max_discount_kurus: { type: integer, description: Yalnızca yüzde indirimde üst sınır }
+        min_basket_kurus: { type: integer, description: Kuponun uygulanabildiği satırların indirimsiz toplamı }
+        category_ids: { type: array, items: { type: integer } }
+        stackable: { type: boolean, default: true }
+        starts_at: { type: string, format: date-time }
+        ends_at: { type: string, format: date-time }
+        max_redemptions: { type: integer, minimum: 1 }
+        per_user_limit: { type: integer, minimum: 1 }

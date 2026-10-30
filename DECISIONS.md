@@ -141,3 +141,37 @@ Her kayıt: bağlam, karar, düşünülen alternatifler, sonuçları.
 - Devre kesici (circuit breaker) yok: sağlayıcı uzun süre kapalıysa her olay kendi denemesini yapar (üstel bekleme yükü sınırlar ama tek tek).
 - Kargo oluşturma kalıcı olarak başarısız olursa olay `dead` olur ve operasyon müdahalesi beklenir; otomatik kısmi iade yapılmaz (iş kararı gerektirir).
 - Simülatörün durumu bellektedir; yeniden başlarsa ödemeleri unutur. Bu bilerek bırakıldı: mutabakatın "sağlayıcı tanımıyor → yeniden iste" yolunu gerçekçi biçimde sınar.
+
+---
+
+## ADR-009: Kupon ve fiyat motoru — saf hesap, en büyük kalan yöntemi, yeniden fiyatlamayla iade
+
+**Bağlam.** Pazaryeri ve satıcı kuponları birlikte, minimum sepet, kategori sınırı ve birlikte kullanım kurallarıyla çalışmalı. İndirim satıcılar arasında kuruş kayması olmadan dağılmalı (hakediş buna dayanır). Kısmi iadede indirim geri hesaplanmalı.
+
+**Karar.**
+- **Saf paket (`internal/pricing`):** Veritabanı ve saat bilmez; aynı girdi aynı sonucu verir. Sipariş, sepet önizlemesi ve iade aynı fonksiyonu kullanır; bu yüzden üçü asla birbirinden farklı tutar hesaplamaz.
+- **Kurallar:**
+  - Satıcı kuponunu satıcı, pazaryeri kuponunu pazaryeri karşılar; kırılım satır ve alt sipariş düzeyinde saklanır (`marketplace_discount_kurus`, `seller_discount_kurus`).
+  - Önce satıcı kuponları, sonra pazaryeri kuponu kalan tutara uygulanır.
+  - Minimum sepet, kuponun uygulanabildiği satırların indirimsiz toplamına bakar.
+  - Kapsam başına bir kupon (bir pazaryeri, satıcı başına bir). Birleştirilemeyen kupon varsa "tek başına" ile "birleştirilebilenlerin hepsi" karşılaştırılır, müşteriye daha avantajlı olan seçilir.
+  - Yüzde indirim aşağı yuvarlanır.
+- **Kuruş kayması yok:** İndirim, uygun satırlara kalan tutarlarıyla orantılı olarak en büyük kalan (Hamilton) yöntemiyle dağıtılır. Kalan eşitse büyük ağırlık, sonra satır kimliği kazanır, yani sonuç deterministiktir. `amount × weight` çarpımı 128-bit (`math/bits`) yapılır; büyük tutarlarda taşma olmaz.
+- **Kısmi iade = yeniden fiyatlama:** Siparişte uygulanan kuponların sipariş anındaki tanımları (`order_coupons.snapshot`) kalan satırlara yeniden uygulanır. İade tutarı "iadeden önce ödenmesi gereken" ile "sonra ödenmesi gereken" arasındaki farktır. Böylece:
+  - İade edilen kalemin indirim payı geri alınır.
+  - Sabit kupon hâlâ geçerliyse indirim kalan kalemlere kayar.
+  - Kalan sepet minimum tutarın altına düşerse kupon geri alınır ve kayıp iadeden kesilir (clawback).
+  - Kademeli iadelerde toplam iade ödenen tutara kuruşu kuruşuna eşittir (testli).
+- **Kullanım limiti:** Toplam limit koşullu `UPDATE coupons SET redeemed_count = redeemed_count + 1 WHERE redeemed_count < max_redemptions` ile korunur; ek olarak `CHECK` kısıtı vardır (T-1 ile aynı desen). Bu `UPDATE` kupon satırını kilitlediği için kullanıcı başına sayım da aynı kupon için sıraya girer. Limit doluysa kupon reddedilir ve sepet onsuz yeniden hesaplanır; her deneme kendi savepoint'indedir. İptal, süre dolumu ve ödeme hatasında kullanım bırakılır.
+- **Kısmi satışla etkileşim:** Kuponlar rezervasyondan sonra hesaplanır. Satılamayan kalem düşünce minimum sepet bozulursa kupon nedeniyle reddedilir ve yanıtta gösterilir.
+- **%100 indirim:** Tahsil edilecek tutar 0 ise ödeme kaydı açılmaz; sipariş doğrudan ödenmiş sayılır ve saga bildirim/kargo adımından devam eder.
+
+**Alternatifler.**
+- *Satır başına ayrı yuvarlama (her satırın payını kendi başına yuvarlamak):* Payların toplamı indirimden 1-2 kuruş sapar. Satıcı hakedişinde bu fark birikir.
+- *İadede satırın sipariş anındaki ödenmiş payını aynen geri vermek:* Basit, ama minimum sepet şartı iade sonrası bozulduğunda kuponun haksız kazancı müşteride kalır. Ayrıca kademeli iadelerde yuvarlama farkı birikir.
+- *Kuponları sırayla deneyip ilk uyanı almak (birleştirilemeyende):* Müşteri kuponları hangi sırayla girdiğine göre farklı fiyat görür; karşılaştırma daha adil ve açıklanabilir.
+
+**Bilinen sınırlamalar.**
+- İadede müşteriden ek ödeme istenmez: kupon kaybı iade edilen kalemden pahalıysa iade 0 olur ve satıcı bazındaki farklar negatif çıkabilir. Hakediş defteri (T-4) bu durumu bir düzeltme kaydı olarak işlemeli.
+- Sepetteki kupon önizlemesi kullanım limitini kontrol etmez; limit ödeme adımında ayrılır, o anda dolmuşsa kupon orada reddedilir.
+- Kategori sınırı düz listedir; alt kategoriler otomatik dahil edilmez.

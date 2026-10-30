@@ -230,3 +230,53 @@ POST {{v1}}/payments/callback
 Content-Type: application/json
 
 {"payment_id": "00000000-0000-0000-0000-000000000000", "status": "succeeded"}
+
+# ── Kupon ve fiyat motoru (T-3) ──────────────────────────
+# Demo kuponlar: PAZAR50, YUZDE10, DEMOGIYIM20, ILK100 (kurallar TESTING.md)
+
+### Yönetici pazaryeri kuponu açar (kapsam rolden gelir)
+POST {{v1}}/coupons
+Authorization: Bearer {{admin.response.body.access_token}}
+Content-Type: application/json
+
+{"code": "HAFTASONU30", "kind": "fixed", "value": 3000, "min_basket_kurus": 20000, "max_redemptions": 500, "per_user_limit": 1}
+
+### Satıcı kendi mağazası için kupon açar
+POST {{v1}}/coupons
+Authorization: Bearer {{seller.response.body.access_token}}
+Content-Type: application/json
+
+{"code": "MAGAZAM15", "kind": "percent", "value": 1500, "max_discount_kurus": 20000}
+
+### Kuponlar (satıcı yalnızca kendininkileri görür)
+GET {{v1}}/coupons
+Authorization: Bearer {{seller.response.body.access_token}}
+
+### Sepete kupon ekle (bilinmeyen kod → 404, süresi geçmiş → 422)
+POST {{v1}}/cart/coupons
+Authorization: Bearer {{customer.response.body.access_token}}
+Content-Type: application/json
+
+{"code": "pazar50"}
+
+### Sepet: applied_coupons, rejected_coupons (nedenleriyle), satır bazında indirim
+GET {{v1}}/cart
+Authorization: Bearer {{customer.response.body.access_token}}
+
+### Kuponu sepetten çıkar
+DELETE {{v1}}/cart/coupons/PAZAR50
+Authorization: Bearer {{customer.response.body.access_token}}
+
+### Doğrudan siparişte kupon
+POST {{v1}}/orders
+Authorization: Bearer {{customer.response.body.access_token}}
+Content-Type: application/json
+
+{"items": [{"offer_id": "{{newProduct.response.body.variants[0].offers[0].id}}", "quantity": 1}], "coupon_codes": ["YUZDE10", "PAZAR50"]}
+
+### Kısmi iade önizlemesi (yalnızca ödenmiş sipariş; order_item_id sipariş ayrıntısından)
+POST {{v1}}/orders/{{sagaOrder.response.body.id}}/refund-quote
+Authorization: Bearer {{customer.response.body.access_token}}
+Content-Type: application/json
+
+{"items": [{"order_item_id": "00000000-0000-0000-0000-000000000000", "quantity": 1}]}

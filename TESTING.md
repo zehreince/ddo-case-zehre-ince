@@ -51,8 +51,21 @@ Migrasyon servisi her açılışta bu hesapları oluşturur (varsa dokunmaz). **
 | T-2d | ,02 ürün; ödeme sağlayıcıya ulaştıktan sonra müşteri iptal eder | Sipariş iptal, stok iade; sonra gelen başarılı ödeme → **telafi**: otomatik iade (`refunded`) | ✅ |
 | T-2e | Operasyon hesabıyla `GET /api/v1/ops/outbox` | Bırakılmış (dead) olay yok; müşteri 403 alır | ✅ |
 | WEBHOOK | İmzasız `POST /payments/callback` ve `/shipping/callback` | 401 `invalid_signature` | ✅ |
+| T-3a | Üç satıcı satırı + başka satıcı; pazaryeri (sabit) + satıcı (yüzde) kuponu ile sipariş | İki kupon da uygulanır; satıcı kuponu yalnızca kendi satırlarına; alt sipariş ve satır tutarları sipariş toplamına kuruşu kuruşuna eşit | ✅ |
+| T-3b | Min. sepeti tutmayan, kategorisi uymayan ve bilinmeyen kupon; sonra birleştirilemeyen + birleştirilebilen kupon | Nedenleriyle reddedilir (`min_basket`, `no_eligible_items`, `not_found`); daha avantajlı birleştirilemeyen kupon seçilir, diğeri `not_combinable` | ✅ |
+| T-3c | 3 kullanım hakkı olan kuponla 20 eşzamanlı sipariş | Tam 3'ü indirimli; diğerleri indirimsiz oluşur (`usage_limit`) | ✅ |
+| T-3d | Min. 250 TL kuponla 300 TL sipariş, ödeme sonrası 100 TL'lik kalem için `POST /orders/{id}/refund-quote` | Kalan sepet min. altına düşer → kupon geri alınır: iade 50,05 TL, kesinti (clawback) gösterilir | ✅ |
 | F-5, F-7 | | | ⏳ |
-| T-3 … T-5 | | | ⏳ |
+| T-4, T-5 | | | ⏳ |
+
+### Demo kuponlar
+
+| Kod | Tür | Kural |
+|---|---|---|
+| `PAZAR50` | Pazaryeri, 50 TL | Min. sepet 300 TL, birleştirilebilir |
+| `YUZDE10` | Pazaryeri, %10 (en çok 150 TL) | Birleştirilemez: diğer kuponlarla verilirse daha avantajlı seçenek kullanılır |
+| `DEMOGIYIM20` | Demo Mağaza, %20 | Yalnızca Giyim kategorisindeki Demo Mağaza ürünleri |
+| `ILK100` | Pazaryeri, 100 TL | Min. sepet 500 TL, toplam 100 kullanım, kişi başı 1 |
 
 ### Ödeme simülatörü: test kartları gibi kuruş değerleri
 
@@ -85,6 +98,10 @@ Sipariş **toplamının** kuruş hanesi simülatörün davranışını belirler 
 | **T-2** ödeme | `cd backend && go test ./internal/payment -v` | Çift/eşzamanlı callback → tek etki; ret → stok iadesi; kapalı siparişe geç ödeme → bir kez iade; mutabakat: kayıp callback, sağlayıcının unuttuğu ödeme, askıda ödeme |
 | **T-2** kargo | `cd backend && go test ./internal/shipping -v` | Gönderi bir kez oluşturulur; tekrar eden / sırasız kargo olayı durumu geri almaz |
 | Simülatör | `cd backend && go test ./internal/simulator -v` | Aynı tohum → aynı sonuç; HTTP istemcilerimiz gerçek simülatöre karşı her senaryoda |
+| **T-3** fiyat motoru | `cd backend && go test ./internal/pricing -v -cover` | Yüzde/sabit/üst sınır, min. sepet, kategori, kapsam çakışması, birlikte kullanım seçimi; rastgele 2.000 sepette kuruş kayması yok, sonuç satır sırasından bağımsız; kademeli tam iadede iadeler toplamı ödenen tutara eşit; kapsama %99+ |
+| **T-3** dağıtım | `cd backend && go test ./internal/pricing -run Allocate -v` | En büyük kalan yöntemi; 128-bit ara çarpımla taşma yok |
+| **T-3** kullanım limiti | `cd backend && go test ./internal/order -run CouponUsageLimit -v` | 10 hakkı olan kupona 60 eşzamanlı sipariş → tam 10 indirimli (`redeemed_count` = aktif kullanım = 10) |
+| **T-3** kısmi iade | `cd backend && go test ./internal/pricing -run Refund -v` | Yüzde kuponda iade edilen kalemin indirimi de geri alınır; min. sepet altına düşünce kupon geri alınır (clawback); iade asla negatif değil |
 | Idempotency | `cd backend && go test ./internal/platform/idempotency -v` | Aynı anahtar → işlem bir kez; eşzamanlı aynı anahtar → 1 × 201 + 9 × 409 |
 | Refresh yarışı | `cd backend && go test ./internal/auth -run ConcurrentRequests -v -count=5` | Aynı refresh token'la 10 eşzamanlı istekten her seferinde tam 1'i başarılı (`SELECT … FOR UPDATE`) |
 | Token çalınması | `cd backend && go test ./internal/auth -run ReuseRevokesWholeFamily -v` | İptal edilmiş token kullanılınca oturum ailesinin tamamı iptal edilir, audit'e yazılır |
