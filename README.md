@@ -85,10 +85,22 @@ Dürüst durum; bir şeyi yapılmış gibi göstermek yerine neyin eksik olduğu
 | F-5 satıcı hakedişi | Kısmen | Satıcı hakediş kalemlerini (brüt, komisyon, kargo, net, vade) ve defterdeki alacak bakiyesini görüyor; ödeme (dönem kapanışı) yok. |
 | F-7 iade | Kısmen | İade **tutarı** hesaplanıyor (`POST /orders/{id}/refund-quote`, kupon geri hesabıyla, T-3). İadenin kendisi (para, stok, defter düzeltmesi) ve raporlar yok. Ödeme öncesi iptal ve geç ödemede otomatik iade var. |
 | T-5 arama | Yapılmadı | `pg_trgm` ve `unaccent` eklentileri kurulu; 1M ürün üretimi, arama ucu, `EXPLAIN` ve p95 ölçümü yok. |
-| Yük testi (`make load`) | Yapılmadı | Eşzamanlılık kanıtları (1.000 eşzamanlı sipariş) var ama k6 p50/p95/p99 tablosu yok. |
+| Yük testi (`make load`) | Kısmen | k6 okuma yükü ölçüldü (aşağıda). Yazma yükü ve kampanya anı senaryosu yok; yazma tarafının eşzamanlılık kanıtı T-1 (1.000 eşzamanlı sipariş). |
 | Arayüz | Kısmen | Giriş, sessiz oturum yenileme, rol bazlı menü, yönetici kullanıcı listesi, sistem durumu. Katalog, sepet, sipariş takibi ve satıcı/operasyon ekranları yok; bu akışlar API (`requests.http`) ile denenebiliyor. |
 
 **Önceliklendirme:** Süre kısıtında zorlu görevlerin doğruluğunu (T-1, T-2, T-3) yüzeysel ama geniş kapsamın önüne koydum. Her biri gerçek PostgreSQL üzerinde eşzamanlılık testleriyle, çalışan sistemde `make verify` ile ve T-2'de `make chaos` ile kanıtlı.
+
+## Yük testi
+
+`make load` — k6, 20 sanal kullanıcı, 30 sn, oturum açmış müşterinin okuma yükü (ürün listesi, ürün ayrıntısı, sepet, health). Yerel makine (Docker Desktop, Windows):
+
+| Metrik | Değer |
+|---|---|
+| İstek | 22.014 (725 istek/sn) |
+| p50 | 1,54 ms |
+| p95 | 4,36 ms |
+| p99 | 6,16 ms |
+| Hata oranı | %0 (22.012/22.012 kontrol geçti) |
 
 ## Doğrulama Soruları
 

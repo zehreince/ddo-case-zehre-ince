@@ -39,5 +39,5 @@ reset-demo:  ## Veritabanını silip ilk seed haline döndürür
 	$(COMPOSE) down -v
 	$(COMPOSE) up -d --build --wait
 
-load:
-	@echo "yük testleri henüz eklenmedi"
+load:  ## k6 yük testi (okuma yükü, 20 VU, 30 sn); sistem ayakta olmalı
+	docker run --rm --network carsihub_default -e BASE_URL=http://api:8080 -v "$(CURDIR)/load:/load" grafana/k6:0.54.0 run /load/k6.js
