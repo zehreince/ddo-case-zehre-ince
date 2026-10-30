@@ -29,6 +29,7 @@ Veritabanı host'a açılmaz, yalnızca compose ağı içinden erişilir.
 
 | Komut | Ne yapar |
 |---|---|
+| `make setup` | Git hook'larını açar: commit'te gofmt/vet, push'ta tüm testler |
 | `make up` | Derler, ayağa kaldırır, sağlıklı olana kadar bekler |
 | `make verify` | Tüm kontrolleri uçtan uca çalıştırır, PASS/FAIL tablosu basar |
 | `make reset-demo` | Veritabanını silip ilk seed haline döndürür |

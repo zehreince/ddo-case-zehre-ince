@@ -1,6 +1,10 @@
-.PHONY: up down logs test test-backend test-frontend lint verify reset-demo load
+.PHONY: setup up down logs test test-backend test-frontend lint verify reset-demo load
 
 COMPOSE := docker compose
+
+setup:  ## Git hook'larını açar (commit'te gofmt/vet, push'ta testler)
+	git config core.hooksPath .githooks
+	cd frontend && npm ci
 
 up:  ## Sistemi derleyip ayağa kaldırır, sağlıklı olana kadar bekler
 	$(COMPOSE) up -d --build --wait
