@@ -23,8 +23,10 @@ test-backend:
 test-frontend:
 	cd frontend && npm test
 
-lint:
-	cd backend && go vet ./... && golangci-lint run
+GOLANGCI := golangci/golangci-lint:v2.5.0
+
+lint:  ## CI ile aynı golangci-lint sürümünü Docker içinde koşturur
+	docker run --rm -v "$(CURDIR)/backend:/app" -w /app $(GOLANGCI) golangci-lint run ./...
 	cd frontend && npm run typecheck
 
 verify: up  ## Tüm özellik ve görevleri uçtan uca dener, PASS/FAIL tablosu basar

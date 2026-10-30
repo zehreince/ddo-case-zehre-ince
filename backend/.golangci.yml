@@ -1,0 +1,26 @@
+version: "2"
+
+linters:
+  default: standard
+  enable:
+    - bodyclose   # HTTP yanıt gövdeleri kapatılmalı
+    - errorlint   # hatalar errors.Is/As ile karşılaştırılmalı, %w ile sarılmalı
+    - noctx       # dış çağrılar context taşımalı (zaman aşımı/iptal)
+    - gosec
+  settings:
+    errcheck:
+      exclude-functions:
+        # Tabwriter tamponludur; hata Flush'ta kontrol edilir.
+        - fmt.Fprintf
+        - fmt.Fprintln
+    gosec:
+      excludes:
+        - G115 # int -> int32 dönüşümü config'te sınırlı aralıkta yapılıyor
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters: [gosec, noctx]
+
+formatters:
+  enable:
+    - gofmt

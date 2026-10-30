@@ -5,6 +5,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -27,11 +28,15 @@ type client struct {
 }
 
 func (c *client) get(path string) (int, []byte, error) {
-	resp, err := c.http.Get(c.base + path)
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, c.base+path, nil)
 	if err != nil {
 		return 0, nil, err
 	}
-	defer resp.Body.Close()
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(resp.Body)
 	return resp.StatusCode, body, err
 }
@@ -96,7 +101,10 @@ func main() {
 		}
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", ch.id, ch.name, result, detail)
 	}
-	tw.Flush()
+	if err := tw.Flush(); err != nil {
+		fmt.Fprintln(os.Stderr, "tablo yazılamadı:", err)
+		os.Exit(2)
+	}
 	fmt.Printf("\n%d/%d kontrol geçti\n", len(checks)-failed, len(checks))
 	if failed > 0 {
 		os.Exit(1)
