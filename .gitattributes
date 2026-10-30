@@ -1,0 +1,5 @@
+# Konteyner içinde çalışan betikler CRLF ile kırılır; depoda her şey LF.
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.ico binary

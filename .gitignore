@@ -1,0 +1,24 @@
+# Ortam
+.env
+!.env.example
+
+# Go
+/backend/bin/
+*.test
+coverage.out
+coverage.html
+
+# Frontend
+node_modules/
+/frontend/dist/
+
+# Yük testi ve doğrulama çıktıları
+/load/results/
+/verify-report.*
+
+# Editör / işletim sistemi
+.idea/
+.vscode/*
+!.vscode/extensions.json
+.DS_Store
+Thumbs.db
