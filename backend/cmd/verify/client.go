@@ -17,6 +17,7 @@ type client struct {
 type response struct {
 	status int
 	body   []byte
+	header http.Header
 }
 
 // errorCode standart hata gövdesindeki kodu döner; gövde hata değilse boş.
@@ -46,6 +47,11 @@ func (r response) expect(status int, code string) error {
 }
 
 func (c *client) do(method, path, token string, body any) (response, error) {
+	return c.doKey(method, path, token, "", body)
+}
+
+// doKey isteği Idempotency-Key başlığıyla gönderir (boşsa başlıksız).
+func (c *client) doKey(method, path, token, idemKey string, body any) (response, error) {
 	var rd io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -64,13 +70,16 @@ func (c *client) do(method, path, token string, body any) (response, error) {
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
+	if idemKey != "" {
+		req.Header.Set("Idempotency-Key", idemKey)
+	}
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return response{}, err
 	}
 	defer func() { _ = resp.Body.Close() }()
 	b, err := io.ReadAll(resp.Body)
-	return response{status: resp.StatusCode, body: b}, err
+	return response{status: resp.StatusCode, body: b, header: resp.Header}, err
 }
 
 func (c *client) get(path, token string) (response, error) {

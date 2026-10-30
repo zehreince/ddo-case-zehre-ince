@@ -24,6 +24,8 @@ func allChecks() []check {
 	var all []check
 	all = append(all, platformChecks...)
 	all = append(all, authChecks...)
+	all = append(all, catalogChecks...)
+	all = append(all, inventoryChecks...)
 	return all
 }
 
@@ -32,7 +34,9 @@ func main() {
 	if base == "" {
 		base = "http://localhost:8080"
 	}
-	c := &client{base: strings.TrimRight(base, "/"), http: &http.Client{Timeout: 10 * time.Second}}
+	// Eşzamanlılık kontrolleri yüzlerce paralel istek atar; bağlantılar yeniden kullanılsın.
+	transport := &http.Transport{MaxIdleConns: 256, MaxIdleConnsPerHost: 256, MaxConnsPerHost: 256}
+	c := &client{base: strings.TrimRight(base, "/"), http: &http.Client{Timeout: 30 * time.Second, Transport: transport}}
 
 	checks := allChecks()
 	failed := 0
