@@ -1,14 +1,12 @@
-// Komut verify, ayağa kalkmış sistem üzerinde uçtan uca kontrolleri çalıştırır
-// ve sonunda PASS/FAIL tablosu basar. Bir kontrol bile düşerse çıkış kodu 1'dir.
+// Komut verify, ayağa kalkmış ve seed edilmiş sistem üzerinde uçtan uca
+// kontrolleri çalıştırır ve sonunda PASS/FAIL tablosu basar. Bir kontrol bile
+// düşerse çıkış kodu 1'dir.
 //
-// Her özellik eklendiğinde buraya kendi kimliğiyle (F-1, T-1 ...) kontrol eklenir.
+// Her özellik eklendiğinde kendi kimliğiyle (F-1, T-1 ...) bir kontrol eklenir.
 package main
 
 import (
-	"context"
-	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"strings"
@@ -22,63 +20,11 @@ type check struct {
 	run  func(*client) error
 }
 
-type client struct {
-	base string
-	http *http.Client
-}
-
-func (c *client) get(path string) (int, []byte, error) {
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, c.base+path, nil)
-	if err != nil {
-		return 0, nil, err
-	}
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return 0, nil, err
-	}
-	defer func() { _ = resp.Body.Close() }()
-	body, err := io.ReadAll(resp.Body)
-	return resp.StatusCode, body, err
-}
-
-var checks = []check{
-	{"HEALTH", "GET /health 200 ve veritabanı ok", func(c *client) error {
-		code, body, err := c.get("/health")
-		if err != nil {
-			return err
-		}
-		var h struct{ Status, Database string }
-		if err := json.Unmarshal(body, &h); err != nil {
-			return fmt.Errorf("json değil: %w", err)
-		}
-		if code != http.StatusOK || h.Database != "ok" {
-			return fmt.Errorf("durum=%d database=%q", code, h.Database)
-		}
-		return nil
-	}},
-	{"API-ERR", "bilinmeyen uç standart hata gövdesi döner", func(c *client) error {
-		code, body, err := c.get("/api/v1/olmayan-uc")
-		if err != nil {
-			return err
-		}
-		var e struct {
-			Error struct{ Code, Message string } `json:"error"`
-		}
-		if err := json.Unmarshal(body, &e); err != nil || code != http.StatusNotFound || e.Error.Code == "" {
-			return fmt.Errorf("durum=%d gövde=%s", code, body)
-		}
-		return nil
-	}},
-	{"METRICS", "GET /metrics Prometheus formatında", func(c *client) error {
-		code, body, err := c.get("/metrics")
-		if err != nil {
-			return err
-		}
-		if code != http.StatusOK || !strings.Contains(string(body), "http_request_duration_seconds") {
-			return fmt.Errorf("durum=%d, metrik bulunamadı", code)
-		}
-		return nil
-	}},
+func allChecks() []check {
+	var all []check
+	all = append(all, platformChecks...)
+	all = append(all, authChecks...)
+	return all
 }
 
 func main() {
@@ -88,6 +34,7 @@ func main() {
 	}
 	c := &client{base: strings.TrimRight(base, "/"), http: &http.Client{Timeout: 10 * time.Second}}
 
+	checks := allChecks()
 	failed := 0
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "KİMLİK\tKONTROL\tSONUÇ\tAYRINTI")
