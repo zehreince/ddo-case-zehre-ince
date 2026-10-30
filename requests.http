@@ -1,0 +1,11 @@
+# VS Code REST Client koleksiyonu. Önce: docker compose up --build
+@api = http://localhost:8080
+
+### Sağlık
+GET {{api}}/health
+
+### Metrikler
+GET {{api}}/metrics
+
+### Bilinmeyen uç → standart hata gövdesi
+GET {{api}}/api/v1/olmayan-uc

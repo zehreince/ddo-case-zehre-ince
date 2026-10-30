@@ -1,0 +1,47 @@
+openapi: 3.1.0
+info:
+  title: ÇarşıHub API
+  version: 0.1.0
+servers:
+  - url: http://localhost:8080
+paths:
+  /health:
+    get:
+      summary: Servis ve veritabanı sağlık durumu
+      responses:
+        "200":
+          description: Servis ve veritabanı ayakta
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Health" }
+        "503":
+          description: Veritabanına ulaşılamıyor
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Health" }
+  /metrics:
+    get:
+      summary: Prometheus formatında metrikler
+      responses:
+        "200":
+          description: Metin biçiminde metrikler
+          content:
+            text/plain: {}
+components:
+  schemas:
+    Health:
+      type: object
+      required: [status, database]
+      properties:
+        status: { type: string, enum: [ok, degraded] }
+        database: { type: string, enum: [ok, unreachable] }
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string, example: not_found }
+            message: { type: string }
