@@ -48,5 +48,11 @@ func Run(ctx context.Context, pool *pgxpool.Pool, bcryptCost int, log *slog.Logg
 		created += int(tag.RowsAffected())
 	}
 	log.Info("demo kullanıcılar hazır", "created", created, "total", len(DemoUsers))
+
+	products, err := Catalog(ctx, pool)
+	if err != nil {
+		return fmt.Errorf("demo katalog: %w", err)
+	}
+	log.Info("demo katalog hazır", "created_products", products, "total_products", len(demoProducts))
 	return nil
 }

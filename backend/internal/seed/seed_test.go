@@ -32,6 +32,18 @@ func TestRun_CreatesOneUserPerRoleAndIsIdempotent(t *testing.T) {
 		t.Fatalf("users=%d roles=%d, her rol için tam bir kullanıcı bekleniyordu", users, roles)
 	}
 
+	// Katalog iki kez çalıştırılsa da tek kopya; demo satıcı hesabı satıcıya bağlı.
+	var products, offers, linked int
+	if err := pool.QueryRow(ctx, `
+		SELECT (SELECT count(*) FROM products), (SELECT count(*) FROM offers),
+		       (SELECT count(*) FROM sellers s JOIN users u ON u.id = s.user_id WHERE u.email = 'satici@carsihub.test')`).
+		Scan(&products, &offers, &linked); err != nil {
+		t.Fatal(err)
+	}
+	if products != len(demoProducts) || offers == 0 || linked != 1 {
+		t.Fatalf("products=%d offers=%d linked=%d", products, offers, linked)
+	}
+
 	svc := auth.NewService(pool, auth.NewTokens("0123456789abcdef0123456789abcdef", time.Minute), time.Hour)
 	for _, u := range DemoUsers {
 		sess, err := svc.Login(ctx, auth.LoginInput{Email: u.Email, Password: DemoPassword}, "")
