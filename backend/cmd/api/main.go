@@ -18,6 +18,7 @@ import (
 	"carsihub/internal/auth"
 	"carsihub/internal/cart"
 	"carsihub/internal/catalog"
+	"carsihub/internal/coupon"
 	"carsihub/internal/inventory"
 	"carsihub/internal/notification"
 	"carsihub/internal/ops"
@@ -87,6 +88,7 @@ func run(cfg config.Config, log *slog.Logger) error {
 			shipping.NewHandler(ship, tokens, secret, log),
 			notification.NewHandler(pool, tokens, log),
 			ops.NewHandler(pool, tokens, log),
+			coupon.NewHandler(coupon.NewService(pool), tokens, log),
 		},
 	})
 
