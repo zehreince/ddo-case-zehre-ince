@@ -30,6 +30,7 @@ import (
 	"carsihub/internal/platform/logx"
 	"carsihub/internal/platform/metrics"
 	"carsihub/internal/server"
+	"carsihub/internal/settlement"
 	"carsihub/internal/shipping"
 )
 
@@ -89,6 +90,7 @@ func run(cfg config.Config, log *slog.Logger) error {
 			notification.NewHandler(pool, tokens, log),
 			ops.NewHandler(pool, tokens, log),
 			coupon.NewHandler(coupon.NewService(pool), tokens, log),
+			settlement.NewHandler(settlement.NewService(pool, cfg.PayoutDelay, cfg.ShippingFeeKurus), tokens, log),
 		},
 	})
 

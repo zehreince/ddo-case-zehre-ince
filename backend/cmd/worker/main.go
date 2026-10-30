@@ -32,6 +32,7 @@ import (
 	"carsihub/internal/platform/httpx"
 	"carsihub/internal/platform/logx"
 	"carsihub/internal/platform/metrics"
+	"carsihub/internal/settlement"
 	"carsihub/internal/shipping"
 	"carsihub/internal/sweeper"
 )
@@ -71,6 +72,9 @@ func main() {
 	pub.Subscribe(order.EventPaid, notification.NewConsumer(pool))
 	pub.Subscribe(order.EventPaid, ship.Consumer())
 	pub.Subscribe(payment.EventRefundRequested, payments.RefundConsumer())
+	settle := settlement.NewService(pool, cfg.PayoutDelay, cfg.ShippingFeeKurus)
+	pub.Subscribe(order.EventPaid, settle.CaptureConsumer())
+	pub.Subscribe(shipping.EventDelivered, settle.AccrueConsumer())
 
 	sw := sweeper.New(pool, orders, cfg.SweepInterval, log)
 	m := metrics.New()

@@ -55,6 +55,17 @@ func Run(ctx context.Context, pool *pgxpool.Pool, bcryptCost int, log *slog.Logg
 	}
 	log.Info("demo katalog hazır", "created_products", products, "total_products", len(demoProducts))
 
+	// Komisyon: varsayılan %15, Elektronik %8 (2020'den beri geçerli; yeni oran eklenince çakışma veritabanında engelli).
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO commission_rates (category_id, rate_bps, valid_from)
+		SELECT c, r, '2020-01-01'::timestamptz FROM (VALUES
+			(NULL::bigint, 1500),
+			((SELECT id FROM categories WHERE slug = 'elektronik'), 800)
+		) v(c, r)
+		WHERE NOT EXISTS (SELECT 1 FROM commission_rates x WHERE x.category_id IS NOT DISTINCT FROM v.c)`); err != nil {
+		return fmt.Errorf("komisyon oranları: %w", err)
+	}
+
 	coupons, err := Coupons(ctx, pool)
 	if err != nil {
 		return fmt.Errorf("demo kuponlar: %w", err)

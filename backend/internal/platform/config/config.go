@@ -44,6 +44,10 @@ type Config struct {
 	OutboxPoll         time.Duration
 	OutboxBatch        int
 	OutboxMaxAttempts  int
+
+	// Hakediş (T-4)
+	PayoutDelay      time.Duration // teslimden sonra vade
+	ShippingFeeKurus int64         // alt sipariş başına satıcıdan kesilen kargo ücreti
 }
 
 const minJWTSecretLen = 32
@@ -85,6 +89,9 @@ func Load(lookup LookupFunc) (Config, error) {
 		OutboxPoll:         r.duration("OUTBOX_POLL_INTERVAL", 500*time.Millisecond),
 		OutboxBatch:        r.int("OUTBOX_BATCH_SIZE", 100),
 		OutboxMaxAttempts:  r.int("OUTBOX_MAX_ATTEMPTS", 10),
+
+		PayoutDelay:      time.Duration(r.int("PAYOUT_DELAY_DAYS", 14)) * 24 * time.Hour,
+		ShippingFeeKurus: int64(r.int("SHIPPING_FEE_KURUS", 2990)),
 	}
 	if cfg.WebhookSecret != "" && len(cfg.WebhookSecret) < minJWTSecretLen {
 		r.errs = append(r.errs, fmt.Errorf("WEBHOOK_SECRET: en az %d karakter olmalı", minJWTSecretLen))
