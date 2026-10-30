@@ -4,7 +4,7 @@
 
 Satıcıların ürün sattığı bir pazaryerinin sepet, stok, çok satıcılı sipariş bölme, ödeme, komisyon ve iade süreçlerini yöneten sistem.
 
-> **Durum:** F-1, F-2, F-3, F-4, F-6 ve zorlu görevlerden **T-1**, **T-2**, **T-3** tamam ve `make verify` ile kanıtlı (29/29). **T-4** kısmen (çift taraflı defter çekirdeği hazır ve testli; tahakkuk, dönem kapanışı ve mutabakat bağlanmadı). **T-5**, **F-5**, **F-7** ve arayüzün katalog/sepet ekranları yapılmadı. Ayrıntı ve nedenleri: [Yapılmayanlar](#yapılmayanlar-ve-bilinen-eksikler).
+> **Durum:** F-1, F-2, F-3, F-4, F-6 ve zorlu görevlerden **T-1**, **T-2**, **T-3** tamam ve `make verify` ile kanıtlı (29/29). **T-4** kısmen: çift taraflı defter, zaman geçerlilikli komisyon ve teslimde hakediş tahakkuku çalışıyor ve `make verify` ile kanıtlı (30/30); iade düzeltmesinin deftere bağlanması, dönem kapanışı ve fark mutabakatı yapılmadı. **F-5** kısmen (satıcı hakediş kalemlerini ve alacak bakiyesini görüyor). **T-5**, **F-7**'nin iade işlemi ve arayüzün katalog/sepet ekranları yapılmadı. Ayrıntı ve nedenleri: [Yapılmayanlar](#yapılmayanlar-ve-bilinen-eksikler).
 
 ## Kurulum
 
@@ -81,8 +81,8 @@ Dürüst durum; bir şeyi yapılmış gibi göstermek yerine neyin eksik olduğu
 
 | Kimlik | Durum | Not |
 |---|---|---|
-| T-4 hakediş defteri | **Kısmen** | Çekirdek hazır ve testli: hesap planı, kayıt kurucuları (ödeme, teslim tahakkuku, iade ters kaydı, satıcı ödemesi), borç=alacak kuralının commit anında veritabanında zorlanması, append-only defter, idempotent kayıt, mizan ve bakiye. Şema da hazır: zaman geçerlilikli komisyon oranları (çakışma `btree_gist` exclusion constraint ile engelli), hakediş kalemleri, düzeltmeler, dönemler, ödemeler. **Eksik:** bu kurucuları `order.paid` / `shipment.delivered` olaylarına bağlayan tüketiciler, dönem kapanışı ve fark mutabakatı uçları. Tasarım: [ADR-010](DECISIONS.md#adr-010-çift-taraflı-defter--veritabanında-zorlanan-denge-append-only-idempotent-kayıt). |
-| F-5 satıcı hakedişi | Yapılmadı | T-4'ün uçlarına bağlı. Satıcı tarafında yalnızca bildirimler var. |
+| T-4 hakediş defteri | **Kısmen** | **Çalışan:** çift taraflı defter (borç=alacak commit anında veritabanında zorlanıyor, append-only, idempotent); `order.paid` → ödeme kaydı; `shipment.delivered` → hakediş kalemi (net = brüt − komisyon − kargo, vade = teslim + `PAYOUT_DELAY_DAYS`) ve tahakkuk kaydı; kategori bazlı, zaman geçerlilikli komisyon (sipariş anındaki oran; çakışan aralık `btree_gist` ile engelli); `GET /finance/ledger/balances` (mizan), `GET /seller/settlements`. **Eksik:** iade düzeltmesinin (kurucu ve şema hazır) olaylara bağlanması, dönem kapanışı/ödeme ve fark mutabakatı uçları. Tasarım: [ADR-010](DECISIONS.md#adr-010-çift-taraflı-defter--veritabanında-zorlanan-denge-append-only-idempotent-kayıt). |
+| F-5 satıcı hakedişi | Kısmen | Satıcı hakediş kalemlerini (brüt, komisyon, kargo, net, vade) ve defterdeki alacak bakiyesini görüyor; ödeme (dönem kapanışı) yok. |
 | F-7 iade | Kısmen | İade **tutarı** hesaplanıyor (`POST /orders/{id}/refund-quote`, kupon geri hesabıyla, T-3). İadenin kendisi (para, stok, defter düzeltmesi) ve raporlar yok. Ödeme öncesi iptal ve geç ödemede otomatik iade var. |
 | T-5 arama | Yapılmadı | `pg_trgm` ve `unaccent` eklentileri kurulu; 1M ürün üretimi, arama ucu, `EXPLAIN` ve p95 ölçümü yok. |
 | Yük testi (`make load`) | Yapılmadı | Eşzamanlılık kanıtları (1.000 eşzamanlı sipariş) var ama k6 p50/p95/p99 tablosu yok. |

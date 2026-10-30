@@ -180,7 +180,7 @@ Her kayıt: bağlam, karar, düşünülen alternatifler, sonuçları.
 
 ## ADR-010: Çift taraflı defter — veritabanında zorlanan denge, append-only, idempotent kayıt
 
-**Durum:** Kısmen uygulandı (çekirdek ve şema; olaylara bağlanması, dönem kapanışı ve mutabakat yapılmadı).
+**Durum:** Kısmen uygulandı. Defter, ödeme kaydı, teslimde tahakkuk ve zaman geçerlilikli komisyon çalışıyor; iade düzeltmesinin olaylara bağlanması, dönem kapanışı ve fark mutabakatı yapılmadı.
 
 **Karar.**
 - **Hesap planı:** `platform:cash`, `platform:customer_advances`, `seller:<id>:payable`, `platform:commission_revenue`, `platform:shipping_revenue`, `platform:marketplace_discount`.
