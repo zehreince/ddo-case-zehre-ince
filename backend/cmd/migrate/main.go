@@ -13,6 +13,7 @@ import (
 	"carsihub/internal/platform/db"
 	"carsihub/internal/platform/logx"
 	"carsihub/internal/platform/migrate"
+	"carsihub/internal/seed"
 )
 
 func main() {
@@ -39,4 +40,9 @@ func main() {
 		os.Exit(1)
 	}
 	log.Info("migrasyon tamam", "applied", applied)
+
+	if err := seed.Run(ctx, pool, cfg.BcryptCost, log); err != nil {
+		log.Error("seed başarısız", "error", err)
+		os.Exit(1)
+	}
 }
