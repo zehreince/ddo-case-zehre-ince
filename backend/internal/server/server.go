@@ -14,11 +14,17 @@ import (
 	"carsihub/internal/platform/metrics"
 )
 
+// Module kendi rotalarını /api/v1 altına bağlayan bir alan paketidir.
+type Module interface {
+	Mount(r chi.Router)
+}
+
 type Deps struct {
 	Config  config.Config
 	Log     *slog.Logger
 	DB      health.Pinger
 	Metrics *metrics.Metrics
+	Modules []Module
 }
 
 func NewRouter(d Deps) http.Handler {
@@ -39,8 +45,9 @@ func NewRouter(d Deps) http.Handler {
 	r.Method(http.MethodGet, "/metrics", d.Metrics.Handler())
 
 	r.Route("/api/v1", func(api chi.Router) {
-		// Modül rotaları sonraki adımlarda burada bağlanacak.
-		_ = api
+		for _, m := range d.Modules {
+			m.Mount(api)
+		}
 	})
 
 	return r

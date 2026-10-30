@@ -22,7 +22,15 @@ type Config struct {
 	RequestTimeout  time.Duration
 	ShutdownTimeout time.Duration
 	CORSOrigins     []string
+
+	JWTSecret    string
+	AccessTTL    time.Duration
+	RefreshTTL   time.Duration
+	BcryptCost   int
+	CookieSecure bool
 }
+
+const minJWTSecretLen = 32
 
 // LookupFunc os.LookupEnv imzasıdır; testlerde sahte ortam vermek için.
 type LookupFunc func(key string) (string, bool)
@@ -41,9 +49,20 @@ func Load(lookup LookupFunc) (Config, error) {
 		RequestTimeout:  r.duration("REQUEST_TIMEOUT", 10*time.Second),
 		ShutdownTimeout: r.duration("SHUTDOWN_TIMEOUT", 20*time.Second),
 		CORSOrigins:     r.list("CORS_ORIGINS"),
+		JWTSecret:       r.required("JWT_SECRET"),
+		AccessTTL:       r.duration("JWT_ACCESS_TTL", 15*time.Minute),
+		RefreshTTL:      r.duration("JWT_REFRESH_TTL", 7*24*time.Hour),
+		BcryptCost:      r.int("BCRYPT_COST", 12),
+		CookieSecure:    r.bool("COOKIE_SECURE", false),
 	}
 	if cfg.DBMaxConns < 1 {
 		r.errs = append(r.errs, errors.New("DB_MAX_CONNS: en az 1 olmalı"))
+	}
+	if cfg.JWTSecret != "" && len(cfg.JWTSecret) < minJWTSecretLen {
+		r.errs = append(r.errs, fmt.Errorf("JWT_SECRET: en az %d karakter olmalı", minJWTSecretLen))
+	}
+	if cfg.BcryptCost < 4 || cfg.BcryptCost > 31 {
+		r.errs = append(r.errs, errors.New("BCRYPT_COST: 4 ile 31 arasında olmalı"))
 	}
 	if err := errors.Join(r.errs...); err != nil {
 		return Config{}, fmt.Errorf("yapılandırma hatası: %w", err)
@@ -97,6 +116,19 @@ func (r *reader) duration(key string, def time.Duration) time.Duration {
 		return def
 	}
 	return d
+}
+
+func (r *reader) bool(key string, def bool) bool {
+	v := r.str(key, "")
+	if v == "" {
+		return def
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		r.errs = append(r.errs, fmt.Errorf("%s: true/false olmalı: %q", key, v))
+		return def
+	}
+	return b
 }
 
 func (r *reader) list(key string) []string {

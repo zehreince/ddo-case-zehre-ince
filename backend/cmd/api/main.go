@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"carsihub/internal/auth"
 	"carsihub/internal/platform/config"
 	"carsihub/internal/platform/db"
 	"carsihub/internal/platform/logx"
@@ -50,9 +51,17 @@ func run(cfg config.Config, log *slog.Logger) error {
 	}
 	defer pool.Close()
 
+	tokens := auth.NewTokens(cfg.JWTSecret, cfg.AccessTTL)
+	authHandler := auth.NewHandler(auth.NewService(pool, tokens, cfg.RefreshTTL), tokens, log, cfg.CookieSecure)
+
+	router := server.NewRouter(server.Deps{
+		Config: cfg, Log: log, DB: pool, Metrics: metrics.New(),
+		Modules: []server.Module{authHandler},
+	})
+
 	srv := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.APIPort),
-		Handler:           server.NewRouter(server.Deps{Config: cfg, Log: log, DB: pool, Metrics: metrics.New()}),
+		Handler:           router,
 		ReadTimeout:       cfg.ReadTimeout,
 		ReadHeaderTimeout: 5 * time.Second,
 		WriteTimeout:      cfg.WriteTimeout,

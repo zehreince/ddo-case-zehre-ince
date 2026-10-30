@@ -18,8 +18,9 @@ linters:
         - G115 # int -> int32 dönüşümü config'te sınırlı aralıkta yapılıyor
   exclusions:
     rules:
+      # Testlerdeki HTTP yardımcısı gövdeyi kendisi kapatıyor; bodyclose bunu izleyemiyor.
       - path: _test\.go
-        linters: [gosec, noctx]
+        linters: [gosec, noctx, bodyclose]
 
 formatters:
   enable:
