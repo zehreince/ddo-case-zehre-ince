@@ -30,7 +30,10 @@ _Kimlik doğrulama adımında eklenecek._
 
 | Görev | Komut | Ne gösterir |
 |---|---|---|
-| Birim testleri | `make test` | Backend + frontend testleri, backend kapsama oranı |
+| Birim + entegrasyon | `make test` | Backend testleri (entegrasyon testleri testcontainers ile gerçek PostgreSQL 16 açar, Docker gerekir), `internal/` kapsaması ve %70 eşiği; frontend testleri |
+| Denetim kaydı | `cd backend && go test ./internal/platform/migrate -run AuditLog -v` | `audit_log` üzerinde UPDATE/DELETE/TRUNCATE veritabanınca reddedilir (42501) |
+| Migrasyonlar | `cd backend && go test ./internal/platform/migrate -v` | Migrasyonlar tekrar çalıştırılabilir ve geri alınabilir |
+| Lint | `make lint` | CI ile aynı golangci-lint sürümü |
 
 ## Arayüzde elle deneme
 

@@ -28,14 +28,21 @@ jobs:
       - name: vet
         run: go vet ./...
 
-      - name: test + kapsama
+      # Entegrasyon testleri testcontainers ile gerçek PostgreSQL 16 açar.
+      - name: test + kapsama (eşik %70)
+        env:
+          GO_TEST_FLAGS: -race -covermode=atomic
+        run: sh scripts/coverage.sh 70
+
+      - name: kapsama özeti
+        if: always()
         run: |
-          go test -race -coverprofile=coverage.out -covermode=atomic ./...
-          go tool cover -func=coverage.out | tee coverage.txt
-          echo "### Test kapsamı" >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-          tail -1 coverage.txt >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "### Test kapsamı (internal/)"
+            echo '```'
+            cat coverage.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v4
         with:

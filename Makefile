@@ -17,8 +17,8 @@ logs:
 
 test: test-backend test-frontend
 
-test-backend:
-	cd backend && go test -race -coverprofile=coverage.out ./... && go tool cover -func=coverage.out | tail -1
+test-backend:  ## Birim + entegrasyon testleri (Docker gerekir), kapsama eşiği %70
+	cd backend && sh scripts/coverage.sh 70
 
 test-frontend:
 	cd frontend && npm test
