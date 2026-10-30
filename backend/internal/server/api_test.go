@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -22,22 +23,45 @@ import (
 	"carsihub/internal/cart"
 	"carsihub/internal/catalog"
 	"carsihub/internal/inventory"
+	"carsihub/internal/notification"
+	"carsihub/internal/ops"
 	"carsihub/internal/order"
+	"carsihub/internal/outbox"
+	"carsihub/internal/payment"
 	"carsihub/internal/platform/config"
 	"carsihub/internal/platform/dbtest"
 	"carsihub/internal/platform/idempotency"
 	"carsihub/internal/platform/metrics"
 	fx "carsihub/internal/platform/testfixture"
 	"carsihub/internal/server"
+	"carsihub/internal/shipping"
 )
 
 const secret = "0123456789abcdef0123456789abcdef"
 
 type api struct {
-	t    *testing.T
-	url  string
-	pool *pgxpool.Pool
+	t      *testing.T
+	url    string
+	pool   *pgxpool.Pool
+	orders *order.Service
+	ship   *shipping.Service
 }
+
+// stubCarrier kargo firmasını taklit eder: takip numarası alt sipariş kimliğinden türetilir.
+type stubCarrier struct{}
+
+func (stubCarrier) Create(_ context.Context, subOrderID, _ string) (string, error) {
+	return "TRK-" + subOrderID[:8], nil
+}
+
+// stubProvider ödeme sağlayıcıyı taklit eder (bu testlerde çağrılmaz).
+type stubProvider struct{}
+
+func (stubProvider) Create(context.Context, string, int64, string) error { return nil }
+func (stubProvider) Status(context.Context, string) (string, string, error) {
+	return payment.ProviderPending, "", nil
+}
+func (stubProvider) Refund(context.Context, string) error { return nil }
 
 func newAPI(t *testing.T) *api {
 	pool := dbtest.New(t)
@@ -48,6 +72,8 @@ func newAPI(t *testing.T) *api {
 		return p.UserID, ok
 	}, log)
 	orders := order.NewService(pool, inventory.PolicyAllowPartial, 15*time.Minute)
+	ship := shipping.NewService(pool, stubCarrier{}, "")
+	pay := payment.NewService(pool, orders, stubProvider{}, "", time.Minute, log)
 	h := server.NewRouter(server.Deps{
 		Config: config.Config{RequestTimeout: 10 * time.Second}, Log: log, DB: pool, Metrics: metrics.New(),
 		Modules: []server.Module{
@@ -55,11 +81,15 @@ func newAPI(t *testing.T) *api {
 			catalog.NewHandler(catalog.NewService(pool), tokens, log),
 			cart.NewHandler(cart.NewService(pool, orders, 10*time.Minute), tokens, idem, log),
 			order.NewHandler(orders, tokens, idem, log),
+			payment.NewHandler(pay, []byte(secret), log),
+			shipping.NewHandler(ship, tokens, []byte(secret), log),
+			notification.NewHandler(pool, tokens, log),
+			ops.NewHandler(pool, tokens, log),
 		},
 	})
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
-	return &api{t: t, url: srv.URL + "/api/v1", pool: pool}
+	return &api{t: t, url: srv.URL + "/api/v1", pool: pool, orders: orders, ship: ship}
 }
 
 // user verilen rolde giriş yapabilen bir kullanıcı oluşturur ve access token döner.
@@ -230,5 +260,103 @@ func TestAPI_SellerToCustomerFlow(t *testing.T) {
 		SELECT old_value::text || ' -> ' || new_value::text FROM audit_log WHERE action = 'offer.stock_set'`).Scan(&oldNew)
 	if !strings.Contains(oldNew, `"stock_on_hand": 3`) || !strings.Contains(oldNew, `"stock_on_hand": 10`) {
 		t.Fatalf("audit eski/yeni değer: %s", oldNew)
+	}
+}
+
+// Ödeme sonrası saga adımlarının HTTP yüzü: satıcı bildirimi, kargo rolü, takip ve operasyon.
+func TestAPI_SagaEndpoints(t *testing.T) {
+	a := newAPI(t)
+	ctx := context.Background()
+	sellerUser, sellerTok := a.user(auth.RoleSeller)
+	sellerID := fx.Seller(t, a.pool, sellerUser)
+	customerID, customerTok := a.user(auth.RoleCustomer)
+	_, otherTok := a.user(auth.RoleCustomer)
+	_, carrierTok := a.user(auth.RoleCarrier)
+	_, opsTok := a.user(auth.RoleOperations)
+
+	o, err := a.orders.Place(ctx, customerID, []inventory.Item{{OfferID: fx.Offer(t, a.pool, sellerID, 1500, 3), Quantity: 1}}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.orders.MarkPaid(ctx, o.ID); err != nil {
+		t.Fatal(err)
+	}
+	var ev outbox.Event
+	if err := a.pool.QueryRow(ctx, `SELECT id, payload FROM outbox_events WHERE event_type = 'order.paid'`).Scan(&ev.ID, &ev.Payload); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 { // en az bir kez teslim: tekrar gelse de tek bildirim, tek gönderi
+		if err := notification.NewConsumer(a.pool).Handle(ctx, ev); err != nil {
+			t.Fatal(err)
+		}
+		if err := a.ship.Consumer().Handle(ctx, ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Satıcı bildirimi
+	var notes struct {
+		Items []notification.Notification `json:"items"`
+	}
+	a.do("GET", "/seller/notifications", sellerTok, "", nil, http.StatusOK, &notes)
+	if len(notes.Items) != 1 || notes.Items[0].OrderID != o.ID || notes.Items[0].TotalKurus != 1500 {
+		t.Fatalf("bildirim: %+v", notes.Items)
+	}
+	a.do("GET", "/seller/notifications", customerTok, "", nil, http.StatusForbidden, nil)
+
+	// Kargo entegrasyonu rolü olay girer; Idempotency-Key olay kimliğidir.
+	tracking := "TRK-" + o.SubOrders[0].ID[:8]
+	path := "/carrier/shipments/" + tracking + "/events"
+	a.do("POST", path, carrierTok, "", map[string]string{"status": "picked_up"}, http.StatusUnprocessableEntity, nil)
+	var res struct{ Duplicate bool }
+	a.do("POST", path, carrierTok, "olay-1", map[string]string{"status": "picked_up"}, http.StatusOK, &res)
+	a.do("POST", path, carrierTok, "olay-1", map[string]string{"status": "picked_up"}, http.StatusOK, &res)
+	if !res.Duplicate {
+		t.Fatal("aynı anahtarla ikinci olay duplicate olmalı")
+	}
+	a.do("POST", path, carrierTok, "olay-2", map[string]string{"status": "uçtu"}, http.StatusUnprocessableEntity, nil)
+	a.do("POST", "/carrier/shipments/YOK/events", carrierTok, "olay-3", map[string]string{"status": "picked_up"}, http.StatusNotFound, nil)
+	a.do("POST", path, customerTok, "olay-4", map[string]string{"status": "delivered"}, http.StatusForbidden, nil)
+
+	// Takip: müşteri yalnızca kendi gönderisini görür.
+	var sh shipping.Shipment
+	a.do("GET", "/shipments/"+tracking, customerTok, "", nil, http.StatusOK, &sh)
+	if sh.Status != "picked_up" || len(sh.Events) != 1 {
+		t.Fatalf("takip: %+v", sh)
+	}
+	a.do("GET", "/shipments/"+tracking, otherTok, "", nil, http.StatusNotFound, nil)
+	a.do("GET", "/shipments/YOK", carrierTok, "", nil, http.StatusNotFound, nil)
+	var got order.Order
+	a.do("GET", "/orders/"+o.ID, customerTok, "", nil, http.StatusOK, &got)
+	if got.Payment == nil || got.SubOrders[0].Shipment == nil || got.SubOrders[0].Status != "shipped" {
+		t.Fatalf("sipariş ayrıntısı saga durumunu göstermeli: %+v", got)
+	}
+
+	// İmzasız kargo callback'i reddedilir.
+	a.do("POST", "/shipping/callback", "", "", map[string]string{"event_id": "x"}, http.StatusUnauthorized, nil)
+
+	// Operasyon: outbox görünümü ve bırakılmış olayı yeniden kuyruğa alma.
+	if _, err := a.pool.Exec(ctx, `UPDATE outbox_events SET dead = true, attempts = 10, last_error = 'kalıcı hata' WHERE id = $1`, ev.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.pool.Exec(ctx, `UPDATE outbox_events SET published_at = NULL WHERE id = $1`, ev.ID); err != nil {
+		t.Fatal(err)
+	}
+	var summary struct {
+		Dead     int
+		Problems []struct{ ID int64 }
+	}
+	a.do("GET", "/ops/outbox", opsTok, "", nil, http.StatusOK, &summary)
+	if summary.Dead != 1 || len(summary.Problems) != 1 {
+		t.Fatalf("outbox özeti: %+v", summary)
+	}
+	a.do("GET", "/ops/outbox", customerTok, "", nil, http.StatusForbidden, nil)
+	id := strconv.FormatInt(ev.ID, 10)
+	a.do("POST", "/ops/outbox/"+id+"/retry", opsTok, "", nil, http.StatusNoContent, nil)
+	a.do("POST", "/ops/outbox/"+id+"/retry", opsTok, "", nil, http.StatusConflict, nil)
+	a.do("POST", "/ops/outbox/abc/retry", opsTok, "", nil, http.StatusNotFound, nil)
+	a.do("GET", "/ops/outbox", opsTok, "", nil, http.StatusOK, &summary)
+	if summary.Dead != 0 {
+		t.Fatal("yeniden kuyruğa alınan olay bırakılmış sayılmamalı")
 	}
 }

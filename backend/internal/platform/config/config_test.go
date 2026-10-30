@@ -14,7 +14,7 @@ func env(m map[string]string) LookupFunc {
 
 // valid zorunlu alanları dolu bir ortam üretir; testler üzerine yazar.
 func valid(extra map[string]string) LookupFunc {
-	m := map[string]string{"DATABASE_URL": "postgres://x", "JWT_SECRET": testSecret}
+	m := map[string]string{"DATABASE_URL": "postgres://x", "JWT_SECRET": testSecret, "WEBHOOK_SECRET": testSecret}
 	for k, v := range extra {
 		m[k] = v
 	}
@@ -65,7 +65,7 @@ func TestLoad_ReportsAllErrorsAtOnce(t *testing.T) {
 	if err == nil {
 		t.Fatal("hata bekleniyordu")
 	}
-	for _, want := range []string{"DATABASE_URL", "JWT_SECRET", "API_PORT", "SHUTDOWN_TIMEOUT"} {
+	for _, want := range []string{"DATABASE_URL", "JWT_SECRET", "WEBHOOK_SECRET", "API_PORT", "SHUTDOWN_TIMEOUT"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("hata %q içermeli: %v", want, err)
 		}

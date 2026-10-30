@@ -1,27 +1,38 @@
-// Komut worker arka plan işlerini çalıştırır: süresi dolan rezervasyon ve
-// siparişlerin süpürülmesi (ileride outbox yayımlayıcısı da burada).
+// Komut worker arka plan işlerini çalıştırır:
 //
-//	worker              işçiyi başlatır; :WORKER_PORT'ta /health ve /metrics
-//	worker healthcheck  konteyner sağlık kontrolü
+//   - outbox yayımlayıcısı (saga adımları: ödeme iste, satıcıya bildir, kargo oluştur, iade)
+//
+//   - ödeme mutabakatı (callback'i gecikmiş ödemeleri sağlayıcıya sorar)
+//
+//   - süresi dolan rezervasyon ve siparişlerin süpürülmesi
+//
+//     worker              işçiyi başlatır; :WORKER_PORT'ta /health ve /metrics
+//     worker healthcheck  konteyner sağlık kontrolü
 package main
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
 	"carsihub/internal/inventory"
+	"carsihub/internal/notification"
 	"carsihub/internal/order"
+	"carsihub/internal/outbox"
+	"carsihub/internal/payment"
 	"carsihub/internal/platform/config"
 	"carsihub/internal/platform/db"
 	"carsihub/internal/platform/httpx"
 	"carsihub/internal/platform/logx"
 	"carsihub/internal/platform/metrics"
+	"carsihub/internal/shipping"
 	"carsihub/internal/sweeper"
 )
 
@@ -39,7 +50,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	pool, err := db.Connect(ctx, cfg.DatabaseURL, 5)
+	pool, err := db.Connect(ctx, cfg.DatabaseURL, 10)
 	if err != nil {
 		log.Error("veritabanına bağlanılamadı", "error", err)
 		os.Exit(1)
@@ -47,9 +58,24 @@ func main() {
 	defer pool.Close()
 
 	policy, _ := inventory.ParsePolicy(cfg.PartialFulfillment)
-	sw := sweeper.New(pool, order.NewService(pool, policy, cfg.PaymentTTL), cfg.SweepInterval, log)
+	secret := []byte(cfg.WebhookSecret)
+	orders := order.NewService(pool, policy, cfg.PaymentTTL)
+	payments := payment.NewService(pool, orders, payment.NewHTTPProvider(cfg.PaymentProviderURL, secret, 5*time.Second),
+		cfg.PublicBaseURL+"/api/v1/payments/callback", cfg.ReconcileAfter, log)
+	ship := shipping.NewService(pool, shipping.NewHTTPCarrier(cfg.CarrierURL, secret, 5*time.Second),
+		cfg.PublicBaseURL+"/api/v1/shipping/callback")
+
+	// Saga: her olay türünün tüketicileri.
+	pub := outbox.NewPublisher(pool, log, cfg.OutboxBatch, cfg.OutboxMaxAttempts)
+	pub.Subscribe(order.EventPlaced, payments.RequestConsumer())
+	pub.Subscribe(order.EventPaid, notification.NewConsumer(pool))
+	pub.Subscribe(order.EventPaid, ship.Consumer())
+	pub.Subscribe(payment.EventRefundRequested, payments.RefundConsumer())
+
+	sw := sweeper.New(pool, orders, cfg.SweepInterval, log)
 	m := metrics.New()
 	m.MustRegister(sw.Collectors()...)
+	m.MustRegister(pub.Collectors()...)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
@@ -69,13 +95,35 @@ func main() {
 		}
 	}()
 
-	log.Info("worker başladı", "sweep_interval", cfg.SweepInterval.String())
-	sw.Run(ctx)
+	log.Info("worker başladı", "sweep_interval", cfg.SweepInterval.String(), "outbox_poll", cfg.OutboxPoll.String())
+	var wg sync.WaitGroup
+	wg.Add(3)
+	go func() { defer wg.Done(); pub.Run(ctx, cfg.OutboxPoll) }()
+	go func() { defer wg.Done(); reconcileLoop(ctx, payments, cfg.ReconcileAfter/2, log) }()
+	go func() { defer wg.Done(); sw.Run(ctx) }()
+	wg.Wait()
 
 	log.Info("worker kapanıyor")
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = srv.Shutdown(shutdownCtx)
+}
+
+func reconcileLoop(ctx context.Context, payments *payment.Service, every time.Duration, log *slog.Logger) {
+	t := time.NewTicker(max(every, time.Second))
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		if n, err := payments.Reconcile(ctx, 100); err != nil && ctx.Err() == nil {
+			log.Warn("ödeme mutabakatı", "checked", n, "error", err)
+		} else if n > 0 {
+			log.Info("ödeme mutabakatı", "checked", n)
+		}
+	}
 }
 
 func healthcheck(port int) int {

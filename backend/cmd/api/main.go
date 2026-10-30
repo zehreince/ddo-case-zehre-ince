@@ -19,13 +19,17 @@ import (
 	"carsihub/internal/cart"
 	"carsihub/internal/catalog"
 	"carsihub/internal/inventory"
+	"carsihub/internal/notification"
+	"carsihub/internal/ops"
 	"carsihub/internal/order"
+	"carsihub/internal/payment"
 	"carsihub/internal/platform/config"
 	"carsihub/internal/platform/db"
 	"carsihub/internal/platform/idempotency"
 	"carsihub/internal/platform/logx"
 	"carsihub/internal/platform/metrics"
 	"carsihub/internal/server"
+	"carsihub/internal/shipping"
 )
 
 func main() {
@@ -66,6 +70,11 @@ func run(cfg config.Config, log *slog.Logger) error {
 		return p.UserID, ok
 	}, log)
 	orders := order.NewService(pool, policy, cfg.PaymentTTL)
+	secret := []byte(cfg.WebhookSecret)
+	payments := payment.NewService(pool, orders, payment.NewHTTPProvider(cfg.PaymentProviderURL, secret, 5*time.Second),
+		cfg.PublicBaseURL+"/api/v1/payments/callback", cfg.ReconcileAfter, log)
+	ship := shipping.NewService(pool, shipping.NewHTTPCarrier(cfg.CarrierURL, secret, 5*time.Second),
+		cfg.PublicBaseURL+"/api/v1/shipping/callback")
 
 	router := server.NewRouter(server.Deps{
 		Config: cfg, Log: log, DB: pool, Metrics: metrics.New(),
@@ -74,6 +83,10 @@ func run(cfg config.Config, log *slog.Logger) error {
 			catalog.NewHandler(catalog.NewService(pool), tokens, log),
 			cart.NewHandler(cart.NewService(pool, orders, cfg.ReservationTTL), tokens, idem, log),
 			order.NewHandler(orders, tokens, idem, log),
+			payment.NewHandler(payments, secret, log),
+			shipping.NewHandler(ship, tokens, secret, log),
+			notification.NewHandler(pool, tokens, log),
+			ops.NewHandler(pool, tokens, log),
 		},
 	})
 

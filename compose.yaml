@@ -46,7 +46,18 @@ services:
       timeout: 3s
       retries: 12
 
-  # Süresi dolan sepet rezervasyonlarını ve ödenmeyen siparişleri süpürür.
+  # Dış bağımlılıkların taklidi: ödeme sağlayıcı + kargo firması.
+  # Kaos betiği bu servisi durdurup başlatır; api ve worker ona bağımlı başlatılmaz.
+  simulator:
+    <<: *backend
+    command: ["simulator"]
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/simulator", "healthcheck"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  # Outbox yayımlayıcısı, ödeme mutabakatı ve süresi dolanların süpürülmesi.
   worker:
     <<: *backend
     command: ["worker"]

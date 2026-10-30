@@ -34,6 +34,16 @@ type Config struct {
 	PartialFulfillment string        // allow | reject
 	SweepInterval      time.Duration // worker süpürme aralığı
 	WorkerPort         int
+
+	// Saga / dış bağımlılıklar (T-2)
+	WebhookSecret      string        // sağlayıcı ve kargo ile paylaşılan HMAC anahtarı
+	PaymentProviderURL string        // ödeme sağlayıcı (simülatör)
+	CarrierURL         string        // kargo firması (simülatör)
+	PublicBaseURL      string        // dış sistemlerin callback için API'ye ulaştığı adres
+	ReconcileAfter     time.Duration // sonucu bu kadar gecikmiş ödemeyi sağlayıcıya sor
+	OutboxPoll         time.Duration
+	OutboxBatch        int
+	OutboxMaxAttempts  int
 }
 
 const minJWTSecretLen = 32
@@ -66,6 +76,21 @@ func Load(lookup LookupFunc) (Config, error) {
 		PartialFulfillment: r.str("PARTIAL_FULFILLMENT", "allow"),
 		SweepInterval:      r.duration("SWEEP_INTERVAL", 5*time.Second),
 		WorkerPort:         r.int("WORKER_PORT", 8081),
+
+		WebhookSecret:      r.required("WEBHOOK_SECRET"),
+		PaymentProviderURL: r.str("PAYMENT_PROVIDER_URL", "http://simulator:8090"),
+		CarrierURL:         r.str("CARRIER_URL", "http://simulator:8090"),
+		PublicBaseURL:      r.str("PUBLIC_BASE_URL", "http://api:8080"),
+		ReconcileAfter:     r.duration("PAYMENT_RECONCILE_AFTER", 10*time.Second),
+		OutboxPoll:         r.duration("OUTBOX_POLL_INTERVAL", 500*time.Millisecond),
+		OutboxBatch:        r.int("OUTBOX_BATCH_SIZE", 100),
+		OutboxMaxAttempts:  r.int("OUTBOX_MAX_ATTEMPTS", 10),
+	}
+	if cfg.WebhookSecret != "" && len(cfg.WebhookSecret) < minJWTSecretLen {
+		r.errs = append(r.errs, fmt.Errorf("WEBHOOK_SECRET: en az %d karakter olmalı", minJWTSecretLen))
+	}
+	if cfg.OutboxBatch < 1 || cfg.OutboxMaxAttempts < 1 {
+		r.errs = append(r.errs, errors.New("OUTBOX_BATCH_SIZE ve OUTBOX_MAX_ATTEMPTS en az 1 olmalı"))
 	}
 	if cfg.DBMaxConns < 1 {
 		r.errs = append(r.errs, errors.New("DB_MAX_CONNS: en az 1 olmalı"))
