@@ -22,6 +22,7 @@ import (
 	"carsihub/internal/auth"
 	"carsihub/internal/cart"
 	"carsihub/internal/catalog"
+	"carsihub/internal/coupon"
 	"carsihub/internal/inventory"
 	"carsihub/internal/notification"
 	"carsihub/internal/ops"
@@ -33,6 +34,7 @@ import (
 	"carsihub/internal/platform/idempotency"
 	"carsihub/internal/platform/metrics"
 	fx "carsihub/internal/platform/testfixture"
+	"carsihub/internal/pricing"
 	"carsihub/internal/server"
 	"carsihub/internal/shipping"
 )
@@ -85,6 +87,7 @@ func newAPI(t *testing.T) *api {
 			shipping.NewHandler(ship, tokens, []byte(secret), log),
 			notification.NewHandler(pool, tokens, log),
 			ops.NewHandler(pool, tokens, log),
+			coupon.NewHandler(coupon.NewService(pool), tokens, log),
 		},
 	})
 	srv := httptest.NewServer(h)
@@ -359,4 +362,94 @@ func TestAPI_SagaEndpoints(t *testing.T) {
 	if summary.Dead != 0 {
 		t.Fatal("yeniden kuyruğa alınan olay bırakılmış sayılmamalı")
 	}
+}
+
+// T-3'ün HTTP yüzü: rol bazlı kupon oluşturma, sepette kupon, indirimli ödeme ve iade önizlemesi.
+func TestAPI_Coupons(t *testing.T) {
+	a := newAPI(t)
+	ctx := context.Background()
+	sellerUser, sellerTok := a.user(auth.RoleSeller)
+	sellerID := fx.Seller(t, a.pool, sellerUser)
+	_, adminTok := a.user(auth.RoleAdmin)
+	_, customerTok := a.user(auth.RoleCustomer)
+	_, otherTok := a.user(auth.RoleCustomer)
+	mine := fx.Offer(t, a.pool, sellerID, 20000, 10)                  // 200 TL
+	other := fx.Offer(t, a.pool, fx.Seller(t, a.pool, ""), 10000, 10) // 100 TL
+
+	// Kapsam rolden gelir: yönetici → pazaryeri, satıcı → kendi mağazası. Müşteri açamaz.
+	var created coupon.Coupon
+	a.do("POST", "/coupons", adminTok, "", map[string]any{"code": "pazar40", "kind": "fixed", "value": 4000, "min_basket_kurus": 25000}, http.StatusCreated, &created)
+	if created.Scope != "marketplace" || created.Code != "PAZAR40" {
+		t.Fatalf("pazaryeri kuponu: %+v", created)
+	}
+	a.do("POST", "/coupons", sellerTok, "", map[string]any{"code": "MAGAZA10", "kind": "percent", "value": 1000}, http.StatusCreated, &created)
+	if created.Scope != "seller" || created.SellerID != sellerID {
+		t.Fatalf("satıcı kuponu: %+v", created)
+	}
+	a.do("POST", "/coupons", sellerTok, "", map[string]any{"code": "MAGAZA10", "kind": "percent", "value": 1000}, http.StatusConflict, nil)
+	a.do("POST", "/coupons", adminTok, "", map[string]any{"code": "x", "kind": "percent", "value": 0}, http.StatusUnprocessableEntity, nil)
+	a.do("POST", "/coupons", customerTok, "", map[string]any{"code": "BENIM", "kind": "fixed", "value": 1}, http.StatusForbidden, nil)
+	var list struct{ Items []coupon.Coupon }
+	a.do("GET", "/coupons", sellerTok, "", nil, http.StatusOK, &list)
+	if len(list.Items) != 1 || list.Items[0].Code != "MAGAZA10" {
+		t.Fatalf("satıcı yalnızca kendi kuponlarını görür: %+v", list.Items)
+	}
+	a.do("GET", "/coupons?limit=1", adminTok, "", nil, http.StatusOK, &list)
+
+	// Sepet: iki satıcı, iki kupon.
+	a.do("POST", "/cart/items", customerTok, "", map[string]any{"offer_id": mine, "quantity": 1}, http.StatusOK, nil)
+	a.do("POST", "/cart/items", customerTok, "", map[string]any{"offer_id": other, "quantity": 1}, http.StatusOK, nil)
+	a.do("POST", "/cart/coupons", customerTok, "", map[string]string{"code": "YOKBOYLE"}, http.StatusNotFound, nil)
+	a.do("POST", "/cart/coupons", customerTok, "", map[string]string{"code": ""}, http.StatusUnprocessableEntity, nil)
+	var c cart.Cart
+	a.do("POST", "/cart/coupons", customerTok, "", map[string]string{"code": "magaza10"}, http.StatusOK, &c)
+	a.do("POST", "/cart/coupons", customerTok, "", map[string]string{"code": "PAZAR40"}, http.StatusOK, &c)
+	// 300 TL: mağaza %10 → 20; pazaryeri 40 → toplam 60 indirim.
+	if c.SubtotalKurus != 30000 || c.DiscountKurus != 6000 || c.TotalKurus != 24000 || len(c.AppliedCoupons) != 2 {
+		t.Fatalf("sepet: %+v", c)
+	}
+	a.do("DELETE", "/cart/coupons/PAZAR40", customerTok, "", nil, http.StatusOK, &c)
+	if c.DiscountKurus != 2000 || len(c.CouponCodes) != 1 {
+		t.Fatalf("kupon çıkarılınca: %+v", c)
+	}
+	a.do("POST", "/cart/coupons", customerTok, "", map[string]string{"code": "PAZAR40"}, http.StatusOK, &c)
+
+	var o order.Order
+	a.do("POST", "/cart/checkout", customerTok, "", nil, http.StatusCreated, &o)
+	if o.TotalKurus != 24000 || len(o.AppliedCoupons) != 2 {
+		t.Fatalf("sipariş: %+v", o)
+	}
+	a.do("GET", "/cart", customerTok, "", nil, http.StatusOK, &c)
+	if len(c.CouponCodes) != 0 {
+		t.Fatal("kuponlar siparişte kullanıldı, sepette kalmamalı")
+	}
+
+	// Doğrudan siparişte kupon kodu sınırı
+	codes := []string{"A", "B", "C", "D", "E", "F"}
+	a.do("POST", "/orders", customerTok, "", map[string]any{"items": []map[string]any{{"offer_id": mine, "quantity": 1}}, "coupon_codes": codes}, http.StatusUnprocessableEntity, nil)
+
+	// İade önizlemesi: ödeme sonrası. Müşteri yalnızca kendi siparişi için.
+	a.do("POST", "/orders/"+o.ID+"/refund-quote", customerTok, "", map[string]any{"items": []any{}}, http.StatusConflict, nil)
+	if err := a.orders.MarkPaid(ctx, o.ID); err != nil {
+		t.Fatal(err)
+	}
+	var full order.Order
+	a.do("GET", "/orders/"+o.ID, customerTok, "", nil, http.StatusOK, &full)
+	var otherItem string
+	for _, sub := range full.SubOrders {
+		for _, l := range sub.Items {
+			if l.OfferID == other {
+				otherItem = l.ID
+			}
+		}
+	}
+	body := map[string]any{"items": []map[string]any{{"order_item_id": otherItem, "quantity": 1}}}
+	var rq pricing.RefundQuote
+	a.do("POST", "/orders/"+o.ID+"/refund-quote", customerTok, "", body, http.StatusOK, &rq)
+	// Kalan 200 TL - %10 = 180 < 250 → pazaryeri kuponu düşer; 240 - 180 = 60 TL iade.
+	if rq.RefundKurus != 6000 || len(rq.LostCoupons) != 1 || rq.LostCoupons[0] != "PAZAR40" {
+		t.Fatalf("iade önizlemesi: %+v", rq)
+	}
+	a.do("POST", "/orders/"+o.ID+"/refund-quote", otherTok, "", body, http.StatusNotFound, nil)
+	a.do("POST", "/orders/"+o.ID+"/refund-quote", customerTok, "", map[string]any{"items": []map[string]any{{"order_item_id": otherItem, "quantity": 5}}}, http.StatusUnprocessableEntity, nil)
 }
