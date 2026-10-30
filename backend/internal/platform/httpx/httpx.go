@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 )
 
@@ -30,6 +31,8 @@ type ErrorBody struct {
 type ErrorDetail struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
+	// Fields yalnızca doğrulama hatalarında doludur: alan adı → sorun.
+	Fields map[string]string `json:"fields,omitempty"`
 }
 
 func JSON(w http.ResponseWriter, status int, v any) {
@@ -42,6 +45,19 @@ func JSON(w http.ResponseWriter, status int, v any) {
 
 func Error(w http.ResponseWriter, status int, code, message string) {
 	JSON(w, status, ErrorBody{Error: ErrorDetail{Code: code, Message: message}})
+}
+
+// ValidationError 422 döner; hangi alanın neden reddedildiği istemciye bildirilir.
+func ValidationError(w http.ResponseWriter, fields map[string]string) {
+	JSON(w, http.StatusUnprocessableEntity, ErrorBody{Error: ErrorDetail{
+		Code: CodeValidation, Message: "girdi doğrulanamadı", Fields: fields,
+	}})
+}
+
+// Internal beklenmeyen hatayı loglar; istemciye ayrıntı sızdırmaz.
+func Internal(w http.ResponseWriter, r *http.Request, log *slog.Logger, err error) {
+	log.ErrorContext(r.Context(), "beklenmeyen hata", "error", err, "request_id", RequestIDFrom(r.Context()))
+	Error(w, http.StatusInternalServerError, CodeInternal, "beklenmeyen bir hata oluştu")
 }
 
 const maxBodyBytes = 1 << 20
