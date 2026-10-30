@@ -2,10 +2,14 @@
 // kontrolleri çalıştırır ve sonunda PASS/FAIL tablosu basar. Bir kontrol bile
 // düşerse çıkış kodu 1'dir.
 //
+//	verify                 tüm kontroller
+//	verify chaos <adım>    kaos betiğinin (scripts/chaos.sh) API adımları
+//
 // Her özellik eklendiğinde kendi kimliğiyle (F-1, T-1 ...) bir kontrol eklenir.
 package main
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -26,6 +30,7 @@ func allChecks() []check {
 	all = append(all, authChecks...)
 	all = append(all, catalogChecks...)
 	all = append(all, inventoryChecks...)
+	all = append(all, sagaChecks...)
 	return all
 }
 
@@ -38,6 +43,10 @@ func main() {
 	transport := &http.Transport{MaxIdleConns: 256, MaxIdleConnsPerHost: 256, MaxConnsPerHost: 256}
 	c := &client{base: strings.TrimRight(base, "/"), http: &http.Client{Timeout: 30 * time.Second, Transport: transport}}
 
+	if len(os.Args) > 1 && os.Args[1] == "chaos" {
+		os.Exit(chaos(c, os.Args[2:]))
+	}
+
 	checks := allChecks()
 	failed := 0
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
@@ -46,7 +55,11 @@ func main() {
 		start := time.Now()
 		err := ch.run(c)
 		result, detail := "PASS", time.Since(start).Round(time.Millisecond).String()
-		if err != nil {
+		var note info
+		switch {
+		case errors.As(err, &note):
+			detail += " · " + string(note)
+		case err != nil:
 			failed++
 			result, detail = "FAIL", err.Error()
 		}

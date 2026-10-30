@@ -160,7 +160,9 @@ var inventoryChecks = []check{
 			return err
 		}
 		const stock, requests = 50, 1000
-		offerID, err := c.newOffer(seller.AccessToken, 999, stock)
+		// ,04 kuruş: simülatörde ödeme hiç sonuçlanmaz. Siparişler ödeme beklerken
+		// kalır; saga stoğu satılmışa çevirmeden rezerve miktar ölçülebilir.
+		offerID, err := c.newOffer(seller.AccessToken, priceHang, stock)
 		if err != nil {
 			return err
 		}

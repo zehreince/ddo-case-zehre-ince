@@ -16,7 +16,8 @@ OUTAGE="${CHAOS_OUTAGE_SECONDS:-20}"
 RECOVERY_TIMEOUT="${CHAOS_RECOVERY_TIMEOUT:-90}"
 
 dc() { docker compose "$@"; }
-step() { docker compose --profile verify run --rm -T verify chaos "$@"; }
+# Servis adı "verify", çalıştırılan ikili de "verify": komut verilince imajın varsayılanı geçersiz kalır.
+step() { docker compose --profile verify run --rm -T verify verify chaos "$@"; }
 say() { printf '\n\033[1m▶ %s\033[0m\n' "$*"; }
 
 say "Hazırlık: sistem ayakta mı?"

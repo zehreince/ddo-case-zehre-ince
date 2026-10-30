@@ -1,4 +1,4 @@
-.PHONY: setup up down logs test test-backend test-frontend lint verify reset-demo load
+.PHONY: setup up down logs test test-backend test-frontend lint verify chaos reset-demo load
 
 COMPOSE := docker compose
 
@@ -31,6 +31,9 @@ lint:  ## CI ile aynı golangci-lint sürümünü Docker içinde koşturur
 
 verify: up  ## Tüm özellik ve görevleri uçtan uca dener, PASS/FAIL tablosu basar
 	$(COMPOSE) --profile verify run --rm --build verify
+
+chaos: up  ## T-2: ödeme sağlayıcıyı ve worker'ı durdurup akışın toparlandığını gösterir
+	bash scripts/chaos.sh
 
 reset-demo:  ## Veritabanını silip ilk seed haline döndürür
 	$(COMPOSE) down -v
