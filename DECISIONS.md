@@ -175,3 +175,19 @@ Her kayıt: bağlam, karar, düşünülen alternatifler, sonuçları.
 - İadede müşteriden ek ödeme istenmez: kupon kaybı iade edilen kalemden pahalıysa iade 0 olur ve satıcı bazındaki farklar negatif çıkabilir. Hakediş defteri (T-4) bu durumu bir düzeltme kaydı olarak işlemeli.
 - Sepetteki kupon önizlemesi kullanım limitini kontrol etmez; limit ödeme adımında ayrılır, o anda dolmuşsa kupon orada reddedilir.
 - Kategori sınırı düz listedir; alt kategoriler otomatik dahil edilmez.
+
+---
+
+## ADR-010: Çift taraflı defter — veritabanında zorlanan denge, append-only, idempotent kayıt
+
+**Durum:** Kısmen uygulandı (çekirdek ve şema; olaylara bağlanması, dönem kapanışı ve mutabakat yapılmadı).
+
+**Karar.**
+- **Hesap planı:** `platform:cash`, `platform:customer_advances`, `seller:<id>:payable`, `platform:commission_revenue`, `platform:shipping_revenue`, `platform:marketplace_discount`.
+- **Gelir tanıma teslimde:** Ödemede para "müşteri avansı"na yazılır. Teslimde avans satıcı alacağına (net = brüt − komisyon − kargo), komisyon ve kargo gelirine dağılır. Pazaryerinin karşıladığı kupon indirimi gider yazılır, satıcının hakedişini azaltmaz.
+- **Denge üç katmanda korunur:** Uygulamada `Validate`; veritabanında ertelenmiş kısıt tetikleyicisi (bir işlemin kayıtları birer birer eklenebilir ama dengesiz işlem commit edilemez); append-only tetikleyici (düzeltme ancak ters kayıtla).
+- **Idempotency:** Her işlemin iş olayından türeyen bir anahtarı vardır (`accrual:<alt_sipariş>`, `return:<iade>` …). Outbox olayı tekrar gelse de deftere bir kez yazılır.
+- **Kurucular işaretli tutarla çalışır:** Negatif tutar kaydı karşı tarafa yazar. Kargo ücreti satıştan büyükse satıcı hesabı borçlanır ve sonraki ödemeden mahsup edilir; iade sıfıra kırpılınca aradaki fark pazaryerine yazılır.
+- **Komisyon zaman geçerlilikli:** Aynı kategoride çakışan geçerlilik aralıkları `btree_gist` exclusion constraint ile engellenir; sipariş anındaki oran uygulanır.
+
+**Alternatifler.** *Tek bakiye kolonu (satıcı tablosunda `balance`):* Basit ama geçmiş ve mutabakat kaybolur; neden o tutarın orada olduğu açıklanamaz. *Defteri uygulama kodunda dengeli tutmak:* Bir hata ya da elle yapılan bir SQL ile bozulabilir; veritabanı kısıtı son savunma.

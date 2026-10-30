@@ -55,8 +55,8 @@ Migrasyon servisi her açılışta bu hesapları oluşturur (varsa dokunmaz). **
 | T-3b | Min. sepeti tutmayan, kategorisi uymayan ve bilinmeyen kupon; sonra birleştirilemeyen + birleştirilebilen kupon | Nedenleriyle reddedilir (`min_basket`, `no_eligible_items`, `not_found`); daha avantajlı birleştirilemeyen kupon seçilir, diğeri `not_combinable` | ✅ |
 | T-3c | 3 kullanım hakkı olan kuponla 20 eşzamanlı sipariş | Tam 3'ü indirimli; diğerleri indirimsiz oluşur (`usage_limit`) | ✅ |
 | T-3d | Min. 250 TL kuponla 300 TL sipariş, ödeme sonrası 100 TL'lik kalem için `POST /orders/{id}/refund-quote` | Kalan sepet min. altına düşer → kupon geri alınır: iade 50,05 TL, kesinti (clawback) gösterilir | ✅ |
-| F-5, F-7 | | | ⏳ |
-| T-4, T-5 | | | ⏳ |
+| T-4 | Kısmen: `cd backend && go test ./internal/ledger -v` | Sipariş yaşam döngüsü (ödeme → teslim tahakkuku → iade ters kaydı → satıcı ödemesi) deftere yazılır; mizan dengede, olay tekrarı ikinci kez yazılmaz; dengesiz kayıt commit'te, değişiklik/silme her zaman reddedilir. Olaylara bağlanması, dönem kapanışı ve mutabakat **yapılmadı** | ⚠️ |
+| F-5, F-7, T-5 | Yapılmadı (bkz. README → Yapılmayanlar) | | ❌ |
 
 ### Demo kuponlar
 
