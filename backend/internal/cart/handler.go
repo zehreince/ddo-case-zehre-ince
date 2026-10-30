@@ -31,7 +31,38 @@ func (h *Handler) Mount(r chi.Router) {
 		r.With(h.idempotency).Post("/items", h.setItem)
 		r.Delete("/items/{id}", h.removeItem)
 		r.With(h.idempotency).Post("/checkout", h.checkout)
+		r.Post("/coupons", h.addCoupon)
+		r.Delete("/coupons/{code}", h.removeCoupon)
 	})
+}
+
+type couponRequest struct {
+	Code string `json:"code"`
+}
+
+func (h *Handler) addCoupon(w http.ResponseWriter, r *http.Request) {
+	var in couponRequest
+	if err := httpx.Decode(w, r, &in); err != nil || in.Code == "" || len(in.Code) > 32 {
+		httpx.ValidationError(w, map[string]string{"code": "kupon kodu gerekli"})
+		return
+	}
+	p, _ := auth.PrincipalFrom(r.Context())
+	c, err := h.svc.AddCoupon(r.Context(), p.UserID, in.Code)
+	if err != nil {
+		h.writeError(w, r, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, c)
+}
+
+func (h *Handler) removeCoupon(w http.ResponseWriter, r *http.Request) {
+	p, _ := auth.PrincipalFrom(r.Context())
+	c, err := h.svc.RemoveCoupon(r.Context(), p.UserID, chi.URLParam(r, "code"))
+	if err != nil {
+		h.writeError(w, r, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, c)
 }
 
 func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
@@ -94,8 +125,19 @@ func (h *Handler) checkout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) writeError(w http.ResponseWriter, r *http.Request, err error) {
-	var stock *order.InsufficientStockError
+	var (
+		stock   *order.InsufficientStockError
+		coupErr *CouponError
+	)
 	switch {
+	case errors.As(err, &coupErr):
+		status := http.StatusUnprocessableEntity
+		if coupErr.Reason == "not_found" {
+			status = http.StatusNotFound
+		}
+		httpx.Error(w, status, "coupon_"+coupErr.Reason, coupErr.Error())
+	case errors.Is(err, ErrTooManyCoupons):
+		httpx.Error(w, http.StatusConflict, "too_many_coupons", err.Error())
 	case errors.As(err, &stock):
 		httpx.ErrorWithDetails(w, http.StatusConflict, "insufficient_stock", err.Error(),
 			map[string]any{"unavailable_items": stock.Failures})

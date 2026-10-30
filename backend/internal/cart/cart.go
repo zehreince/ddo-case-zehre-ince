@@ -11,15 +11,23 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"carsihub/internal/coupon"
 	"carsihub/internal/inventory"
 	"carsihub/internal/order"
 	"carsihub/internal/platform/audit"
+	"carsihub/internal/pricing"
 )
 
 var (
-	ErrItemNotFound = errors.New("sepet kalemi bulunamadı")
-	ErrEmpty        = errors.New("sepet boş")
+	ErrItemNotFound   = errors.New("sepet kalemi bulunamadı")
+	ErrEmpty          = errors.New("sepet boş")
+	ErrTooManyCoupons = errors.New("sepete en fazla 5 kupon eklenebilir")
 )
+
+// CouponError kupon kodunun sepete neden eklenemediğini taşır.
+type CouponError struct{ Reason string }
+
+func (e *CouponError) Error() string { return "kupon kullanılamıyor: " + e.Reason }
 
 type Item struct {
 	ID            string     `json:"id"`
@@ -32,11 +40,21 @@ type Item struct {
 	LineTotal     int64      `json:"line_total_kurus"`
 	Reserved      bool       `json:"reserved"`
 	ReservedUntil *time.Time `json:"reserved_until"`
+	// Kupon indirimi sonrası satır tutarı (ödeme adımında kesinleşir).
+	DiscountKurus int64 `json:"discount_kurus"`
+	TotalKurus    int64 `json:"total_kurus"`
+	sellerID      string
+	categoryID    int64
 }
 
 type Cart struct {
-	Items         []Item `json:"items"`
-	SubtotalKurus int64  `json:"subtotal_kurus"`
+	Items           []Item             `json:"items"`
+	CouponCodes     []string           `json:"coupon_codes"`
+	AppliedCoupons  []pricing.Applied  `json:"applied_coupons"`
+	RejectedCoupons []pricing.Rejected `json:"rejected_coupons"`
+	SubtotalKurus   int64              `json:"subtotal_kurus"`
+	DiscountKurus   int64              `json:"discount_kurus"`
+	TotalKurus      int64              `json:"total_kurus"`
 }
 
 type Service struct {
@@ -53,7 +71,7 @@ func NewService(pool *pgxpool.Pool, orders *order.Service, ttl time.Duration) *S
 func (s *Service) Get(ctx context.Context, userID string) (*Cart, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT ci.id::text, ci.offer_id::text, p.name, v.sku, se.name, ci.quantity, o.price_kurus,
-		       r.status = 'active' AND r.expires_at > now(), r.expires_at
+		       r.status = 'active' AND r.expires_at > now(), r.expires_at, o.seller_id::text, p.category_id
 		FROM cart_items ci
 		JOIN offers o ON o.id = ci.offer_id
 		JOIN sellers se ON se.id = o.seller_id
@@ -70,7 +88,8 @@ func (s *Service) Get(ctx context.Context, userID string) (*Cart, error) {
 	for rows.Next() {
 		var it Item
 		var reserved *bool
-		if err := rows.Scan(&it.ID, &it.OfferID, &it.ProductName, &it.SKU, &it.SellerName, &it.Quantity, &it.UnitPrice, &reserved, &it.ReservedUntil); err != nil {
+		if err := rows.Scan(&it.ID, &it.OfferID, &it.ProductName, &it.SKU, &it.SellerName, &it.Quantity, &it.UnitPrice, &reserved, &it.ReservedUntil,
+			&it.sellerID, &it.categoryID); err != nil {
 			return nil, err
 		}
 		it.Reserved = reserved != nil && *reserved
@@ -78,10 +97,97 @@ func (s *Service) Get(ctx context.Context, userID string) (*Cart, error) {
 			it.ReservedUntil = nil
 		}
 		it.LineTotal = int64(it.Quantity) * it.UnitPrice
-		c.SubtotalKurus += it.LineTotal
 		c.Items = append(c.Items, it)
 	}
-	return c, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	return c, s.price(ctx, userID, c)
+}
+
+// price sepetteki kuponları güncel sepete uygular. Ön izlemedir: kullanım
+// limitleri ödeme adımında ayrılır (o anda dolmuşsa kupon orada reddedilir).
+func (s *Service) price(ctx context.Context, userID string, c *Cart) error {
+	codes, err := s.couponCodes(ctx, userID)
+	if err != nil {
+		return err
+	}
+	resolved, rejected, err := coupon.Resolve(ctx, s.pool, codes, s.now())
+	if err != nil {
+		return err
+	}
+	lines := make([]pricing.Line, len(c.Items))
+	for i, it := range c.Items {
+		lines[i] = pricing.Line{ID: it.OfferID, SellerID: it.sellerID, CategoryID: it.categoryID, Quantity: it.Quantity, UnitPriceKurus: it.UnitPrice}
+	}
+	pcs := make([]pricing.Coupon, len(resolved))
+	for i, r := range resolved {
+		pcs[i] = r.Coupon
+	}
+	q := pricing.Calculate(lines, pcs)
+	for i := range c.Items {
+		if l, ok := q.Line(c.Items[i].OfferID); ok {
+			c.Items[i].DiscountKurus, c.Items[i].TotalKurus = l.DiscountKurus(), l.TotalKurus
+		}
+	}
+	c.CouponCodes = codes
+	c.AppliedCoupons = q.Applied
+	c.RejectedCoupons = append(rejected, q.Rejected...)
+	if c.RejectedCoupons == nil {
+		c.RejectedCoupons = []pricing.Rejected{}
+	}
+	c.SubtotalKurus, c.DiscountKurus, c.TotalKurus = q.SubtotalKurus, q.DiscountKurus, q.TotalKurus
+	return nil
+}
+
+func (s *Service) couponCodes(ctx context.Context, userID string) ([]string, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT c.code FROM cart_coupons cc JOIN coupons c ON c.id = cc.coupon_id
+		WHERE cc.user_id = $1::uuid ORDER BY cc.added_at, c.code`, userID)
+	if err != nil {
+		return nil, err
+	}
+	codes, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if codes == nil {
+		codes = []string{}
+	}
+	return codes, err
+}
+
+// AddCoupon kodu sepete ekler. Bilinmeyen, başlamamış ya da süresi geçmiş kod
+// reddedilir; minimum sepet gibi sepete bağlı koşullar sepet görünümünde
+// "rejected_coupons" ile gösterilir (sepet değişince geçerli hâle gelebilir).
+func (s *Service) AddCoupon(ctx context.Context, userID, code string) (*Cart, error) {
+	resolved, rejected, err := coupon.Resolve(ctx, s.pool, []string{code}, s.now())
+	if err != nil {
+		return nil, err
+	}
+	if len(resolved) == 0 {
+		return nil, &CouponError{Reason: rejected[0].Reason}
+	}
+	var n int
+	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM cart_coupons WHERE user_id = $1::uuid`, userID).Scan(&n); err != nil {
+		return nil, err
+	}
+	if n >= order.MaxCoupons {
+		return nil, ErrTooManyCoupons
+	}
+	if _, err := s.pool.Exec(ctx, `
+		INSERT INTO cart_coupons (user_id, coupon_id) VALUES ($1::uuid, $2::uuid) ON CONFLICT DO NOTHING`,
+		userID, resolved[0].ID); err != nil {
+		return nil, err
+	}
+	return s.Get(ctx, userID)
+}
+
+func (s *Service) RemoveCoupon(ctx context.Context, userID, code string) (*Cart, error) {
+	if _, err := s.pool.Exec(ctx, `
+		DELETE FROM cart_coupons WHERE user_id = $1::uuid AND coupon_id = (SELECT id FROM coupons WHERE code = $2)`,
+		userID, coupon.NormalizeCode(code)); err != nil {
+		return nil, err
+	}
+	return s.Get(ctx, userID)
 }
 
 // SetItem kalemi sepete ekler ya da adedini değiştirir. Eski rezervasyon
@@ -209,8 +315,16 @@ func (s *Service) Checkout(ctx context.Context, userID, requestID string) (*orde
 	if _, err := inventory.Release(ctx, tx, reservations, "released"); err != nil {
 		return nil, err
 	}
-	o, err := s.orders.PlaceInTx(ctx, tx, userID, items, requestID)
+	codes, err := s.couponCodes(ctx, userID)
 	if err != nil {
+		return nil, err
+	}
+	o, err := s.orders.PlaceInTx(ctx, tx, userID, items, requestID, order.WithCoupons(codes))
+	if err != nil {
+		return nil, err
+	}
+	// Kuponlar siparişte kullanıldı (ya da reddedildi); sepette kalmaz.
+	if _, err := tx.Exec(ctx, `DELETE FROM cart_coupons WHERE user_id = $1::uuid`, userID); err != nil {
 		return nil, err
 	}
 
