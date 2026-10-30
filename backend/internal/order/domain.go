@@ -14,6 +14,7 @@ import (
 
 	"carsihub/internal/inventory"
 	"carsihub/internal/platform/httpx"
+	"carsihub/internal/pricing"
 )
 
 const (
@@ -58,6 +59,8 @@ type Order struct {
 	Payment         *PaymentInfo        `json:"payment,omitempty"`
 	SubOrders       []SubOrder          `json:"sub_orders"`
 	Unavailable     []inventory.Failure `json:"unavailable_items,omitempty"`
+	AppliedCoupons  []pricing.Applied   `json:"applied_coupons"`
+	RejectedCoupons []pricing.Rejected  `json:"rejected_coupons,omitempty"`
 }
 
 type SubOrder struct {
@@ -68,7 +71,11 @@ type SubOrder struct {
 	SubtotalKurus int64  `json:"subtotal_kurus"`
 	DiscountKurus int64  `json:"discount_kurus"`
 	TotalKurus    int64  `json:"total_kurus"`
-	Items         []Line `json:"items"`
+	// İndirimin kimin cebinden çıktığı: hakediş hesabında satıcı yalnızca kendi
+	// kuponunun indirimini üstlenir (T-4).
+	MarketplaceDiscountKurus int64  `json:"marketplace_discount_kurus"`
+	SellerDiscountKurus      int64  `json:"seller_discount_kurus"`
+	Items                    []Line `json:"items"`
 	// Shipment ödeme alındıktan sonra kargo adımı başlayınca dolar.
 	Shipment *ShipmentInfo `json:"shipment,omitempty"`
 }
@@ -93,6 +100,12 @@ type Line struct {
 	Quantity       int    `json:"quantity"`
 	UnitPriceKurus int64  `json:"unit_price_kurus"`
 	LineTotalKurus int64  `json:"line_total_kurus"`
+	// Satıra düşen indirim payları ve ödenen tutar (line_total - indirimler).
+	MarketplaceDiscountKurus int64  `json:"marketplace_discount_kurus"`
+	SellerDiscountKurus      int64  `json:"seller_discount_kurus"`
+	PaidKurus                int64  `json:"paid_kurus"`
+	ReturnedQuantity         int    `json:"returned_quantity"`
+	CategoryID               *int64 `json:"-"`
 }
 
 // ValidateItems sipariş girdisini doğrular; alan → hata eşlemesi döner.

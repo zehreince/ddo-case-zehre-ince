@@ -98,3 +98,50 @@ func ActiveReserved(t testing.TB, pool *pgxpool.Pool, offerID string) int {
 	}
 	return n
 }
+
+// CouponSpec testlerde kupon tanımıdır; sıfır değerler veritabanı varsayılanıdır.
+type CouponSpec struct {
+	Code           string
+	Scope          string // marketplace | seller
+	SellerID       string
+	Kind           string // percent | fixed
+	Value          int64
+	MaxDiscount    int64
+	MinBasket      int64
+	CategoryIDs    []int64
+	NotStackable   bool
+	MaxRedemptions *int
+	PerUserLimit   *int
+}
+
+// Coupon kupon oluşturur ve kimliğini döner.
+func Coupon(t testing.TB, pool *pgxpool.Pool, c CouponSpec) string {
+	t.Helper()
+	if c.CategoryIDs == nil {
+		c.CategoryIDs = []int64{}
+	}
+	var id string
+	err := pool.QueryRow(context.Background(), `
+		INSERT INTO coupons (code, scope, seller_id, kind, value, max_discount_kurus, min_basket_kurus, category_ids,
+		                     stackable, max_redemptions, per_user_limit, starts_at)
+		VALUES ($1, $2, NULLIF($3, '')::uuid, $4, $5, $6, $7, $8, $9, $10, $11, now() - interval '1 minute')
+		RETURNING id::text`,
+		c.Code, c.Scope, c.SellerID, c.Kind, c.Value, c.MaxDiscount, c.MinBasket, c.CategoryIDs,
+		!c.NotStackable, c.MaxRedemptions, c.PerUserLimit).Scan(&id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+// OfferCategory teklifin ürün kategorisini döner.
+func OfferCategory(t testing.TB, pool *pgxpool.Pool, offerID string) int64 {
+	t.Helper()
+	var id int64
+	if err := pool.QueryRow(context.Background(), `
+		SELECT p.category_id FROM offers o JOIN product_variants v ON v.id = o.variant_id JOIN products p ON p.id = v.product_id
+		WHERE o.id = $1::uuid`, offerID).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	return id
+}

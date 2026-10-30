@@ -8,10 +8,12 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"carsihub/internal/coupon"
 	"carsihub/internal/inventory"
 	"carsihub/internal/outbox"
 	"carsihub/internal/platform/audit"
 	"carsihub/internal/platform/pagination"
+	"carsihub/internal/pricing"
 )
 
 // InsufficientStockError hangi kalemlerin neden rezerve edilemediğini taşır.
@@ -36,23 +38,32 @@ func NewService(pool *pgxpool.Pool, policy inventory.Policy, paymentTTL time.Dur
 func (s *Service) Policy() inventory.Policy { return s.policy }
 
 // Place doğrudan verilen kalemlerden sipariş oluşturur ("hemen al").
-func (s *Service) Place(ctx context.Context, customerID string, items []inventory.Item, requestID string) (*Order, error) {
+func (s *Service) Place(ctx context.Context, customerID string, items []inventory.Item, requestID string, opts ...PlaceOption) (*Order, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	o, err := s.PlaceInTx(ctx, tx, customerID, items, requestID)
+	o, err := s.PlaceInTx(ctx, tx, customerID, items, requestID, opts...)
 	if err != nil {
 		return nil, err
 	}
 	return o, tx.Commit(ctx)
 }
 
-// PlaceInTx stoğu ödeme süresi boyunca rezerve eder ve siparişi oluşturur.
-// Sepetten ödeme de aynı yolu kullanır. Hata dönerse çağıran geri almalıdır.
-func (s *Service) PlaceInTx(ctx context.Context, tx pgx.Tx, customerID string, items []inventory.Item, requestID string) (*Order, error) {
+// PlaceInTx stoğu ödeme süresi boyunca rezerve eder, kuponları uygular ve
+// siparişi oluşturur. Sepetten ödeme de aynı yolu kullanır. Hata dönerse
+// çağıran geri almalıdır.
+//
+// Kuponlar rezervasyondan SONRA hesaplanır: kısmi satışta satılamayan kalem
+// düşünce minimum sepet şartı bozulabilir; kupon o durumda reddedilir ve
+// yanıtta nedeniyle gösterilir.
+func (s *Service) PlaceInTx(ctx context.Context, tx pgx.Tx, customerID string, items []inventory.Item, requestID string, opts ...PlaceOption) (*Order, error) {
+	var po placeOpts
+	for _, opt := range opts {
+		opt(&po)
+	}
 	deadline := s.now().Add(s.paymentTTL)
 	reserved, failed, err := inventory.ReserveBatch(ctx, tx, customerID, items, deadline)
 	if err != nil {
@@ -68,6 +79,8 @@ func (s *Service) PlaceInTx(ctx context.Context, tx pgx.Tx, customerID string, i
 		SubtotalKurus: subtotal, TotalKurus: subtotal, PaymentDeadline: deadline,
 		Unavailable: failed,
 	}
+	// Sipariş kimliği kupon kullanımının yabancı anahtarıdır; tutarlar fiyat
+	// hesabından sonra güncellenir.
 	if err := tx.QueryRow(ctx, `
 		INSERT INTO orders (customer_id, status, subtotal_kurus, discount_kurus, total_kurus, payment_deadline)
 		VALUES ($1::uuid, $2, $3, $4, $5, $6)
@@ -77,21 +90,50 @@ func (s *Service) PlaceInTx(ctx context.Context, tx pgx.Tx, customerID string, i
 		return nil, err
 	}
 
+	pls, categories, err := lines(ctx, tx, reserved)
+	if err != nil {
+		return nil, err
+	}
+	priced, err := s.price(ctx, tx, customerID, o.ID, pls, po.coupons)
+	if err != nil {
+		return nil, err
+	}
+	if err := applyQuote(subs, priced.quote, categories); err != nil {
+		return nil, err
+	}
+	o.DiscountKurus, o.TotalKurus = priced.quote.DiscountKurus, priced.quote.TotalKurus
+	o.AppliedCoupons, o.RejectedCoupons = priced.quote.Applied, priced.rejected
+	if _, err := tx.Exec(ctx, `UPDATE orders SET discount_kurus = $2, total_kurus = $3 WHERE id = $1::uuid`,
+		o.ID, o.DiscountKurus, o.TotalKurus); err != nil {
+		return nil, err
+	}
+	for i, c := range priced.applied {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO order_coupons (order_id, coupon_id, code, snapshot, discount_kurus) VALUES ($1::uuid, $2::uuid, $3, $4, $5)`,
+			o.ID, c.ID, c.Code, c.Coupon, priced.quote.Applied[i].DiscountKurus); err != nil {
+			return nil, err
+		}
+	}
+
 	reservationIDs := make([]string, 0, len(reserved))
 	for i := range subs {
 		sub := &subs[i]
 		if err := tx.QueryRow(ctx, `
-			INSERT INTO sub_orders (order_id, seller_id, status, subtotal_kurus, discount_kurus, total_kurus)
-			VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6) RETURNING id::text`,
-			o.ID, sub.SellerID, sub.Status, sub.SubtotalKurus, sub.DiscountKurus, sub.TotalKurus).Scan(&sub.ID); err != nil {
+			INSERT INTO sub_orders (order_id, seller_id, status, subtotal_kurus, discount_kurus, total_kurus,
+			                        marketplace_discount_kurus, seller_discount_kurus)
+			VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8) RETURNING id::text`,
+			o.ID, sub.SellerID, sub.Status, sub.SubtotalKurus, sub.DiscountKurus, sub.TotalKurus,
+			sub.MarketplaceDiscountKurus, sub.SellerDiscountKurus).Scan(&sub.ID); err != nil {
 			return nil, err
 		}
 		for j := range sub.Items {
 			line := &sub.Items[j]
 			if err := tx.QueryRow(ctx, `
-				INSERT INTO order_items (order_id, sub_order_id, offer_id, reservation_id, quantity, unit_price_kurus, line_total_kurus)
-				VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, $6, $7) RETURNING id::text`,
-				o.ID, sub.ID, line.OfferID, line.ReservationID, line.Quantity, line.UnitPriceKurus, line.LineTotalKurus).
+				INSERT INTO order_items (order_id, sub_order_id, offer_id, reservation_id, quantity, unit_price_kurus, line_total_kurus,
+				                         category_id, marketplace_discount_kurus, seller_discount_kurus)
+				VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, $6, $7, $8, $9, $10) RETURNING id::text`,
+				o.ID, sub.ID, line.OfferID, line.ReservationID, line.Quantity, line.UnitPriceKurus, line.LineTotalKurus,
+				line.CategoryID, line.MarketplaceDiscountKurus, line.SellerDiscountKurus).
 				Scan(&line.ID); err != nil {
 				return nil, err
 			}
@@ -102,6 +144,18 @@ func (s *Service) PlaceInTx(ctx context.Context, tx pgx.Tx, customerID string, i
 
 	if _, err := tx.Exec(ctx, `UPDATE stock_reservations SET order_id = $1::uuid WHERE id = ANY($2::uuid[])`, o.ID, reservationIDs); err != nil {
 		return nil, err
+	}
+	// Kupon tutarın tamamını karşıladıysa tahsil edilecek bir şey yok: sipariş
+	// doğrudan ödenmiş sayılır ve saga sonraki adımdan (bildirim, kargo) devam eder.
+	if o.TotalKurus == 0 {
+		if err := s.MarkPaidTx(ctx, tx, o.ID, StatusPendingPayment); err != nil {
+			return nil, err
+		}
+		o.Status = StatusPaid
+		return o, audit.Record(ctx, tx, audit.Entry{
+			ActorID: customerID, ActorRole: "customer", Action: "order.placed", EntityType: "order", EntityID: o.ID,
+			RequestID: requestID, New: map[string]any{"status": o.Status, "total_kurus": 0, "coupons": o.AppliedCoupons},
+		})
 	}
 	// Ödeme kaydı ve saga'yı başlatan olay siparişle aynı transaction'da.
 	var paymentID string
@@ -118,7 +172,10 @@ func (s *Service) PlaceInTx(ctx context.Context, tx pgx.Tx, customerID string, i
 	if err := audit.Record(ctx, tx, audit.Entry{
 		ActorID: customerID, ActorRole: "customer", Action: "order.placed",
 		EntityType: "order", EntityID: o.ID, RequestID: requestID,
-		New: map[string]any{"status": o.Status, "total_kurus": o.TotalKurus, "sub_orders": len(subs), "unavailable": failed},
+		New: map[string]any{
+			"status": o.Status, "total_kurus": o.TotalKurus, "discount_kurus": o.DiscountKurus,
+			"sub_orders": len(subs), "unavailable": failed, "coupons": o.AppliedCoupons, "rejected_coupons": o.RejectedCoupons,
+		},
 	}); err != nil {
 		return nil, err
 	}
@@ -254,6 +311,9 @@ func (s *Service) close(ctx context.Context, tx pgx.Tx, orderID string, to Statu
 	if _, err := inventory.Release(ctx, tx, ids, reservationStatus); err != nil {
 		return err
 	}
+	if err := coupon.Release(ctx, tx, orderID); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(ctx, `UPDATE orders SET status = $2, updated_at = now() WHERE id = $1::uuid`, orderID, to); err != nil {
 		return err
 	}
@@ -324,6 +384,20 @@ func (s *Service) Get(ctx context.Context, orderID string) (*Order, error) {
 		return nil, err
 	}
 
+	crows, err := s.pool.Query(ctx, `
+		SELECT oc.coupon_id::text, oc.code, oc.snapshot->>'scope', oc.discount_kurus
+		FROM order_coupons oc WHERE oc.order_id = $1::uuid ORDER BY oc.code`, orderID)
+	if err != nil {
+		return nil, err
+	}
+	if o.AppliedCoupons, err = pgx.CollectRows(crows, func(r pgx.CollectableRow) (pricing.Applied, error) {
+		var a pricing.Applied
+		err := r.Scan(&a.CouponID, &a.Code, &a.Scope, &a.DiscountKurus)
+		return a, err
+	}); err != nil {
+		return nil, err
+	}
+
 	var pay PaymentInfo
 	err = s.pool.QueryRow(ctx, `SELECT id::text, status, failure_reason, callback_count FROM payments WHERE order_id = $1::uuid`, orderID).
 		Scan(&pay.ID, &pay.Status, &pay.FailureReason, &pay.CallbackCount)
@@ -336,8 +410,10 @@ func (s *Service) Get(ctx context.Context, orderID string) (*Order, error) {
 
 	rows, err := s.pool.Query(ctx, `
 		SELECT so.id::text, so.seller_id::text, se.name, so.status, so.subtotal_kurus, so.discount_kurus, so.total_kurus,
+		       so.marketplace_discount_kurus, so.seller_discount_kurus,
 		       sh.tracking_number, sh.status,
-		       oi.id::text, oi.offer_id::text, oi.quantity, oi.unit_price_kurus, oi.line_total_kurus
+		       oi.id::text, oi.offer_id::text, oi.quantity, oi.unit_price_kurus, oi.line_total_kurus,
+		       oi.marketplace_discount_kurus, oi.seller_discount_kurus, oi.paid_kurus, oi.returned_quantity, oi.category_id
 		FROM sub_orders so
 		JOIN sellers se ON se.id = so.seller_id
 		JOIN order_items oi ON oi.sub_order_id = so.id
@@ -356,8 +432,10 @@ func (s *Service) Get(ctx context.Context, orderID string) (*Order, error) {
 			shipmentSts *string
 		)
 		if err := rows.Scan(&sub.ID, &sub.SellerID, &sub.SellerName, &sub.Status, &sub.SubtotalKurus, &sub.DiscountKurus, &sub.TotalKurus,
+			&sub.MarketplaceDiscountKurus, &sub.SellerDiscountKurus,
 			&tracking, &shipmentSts,
-			&l.ID, &l.OfferID, &l.Quantity, &l.UnitPriceKurus, &l.LineTotalKurus); err != nil {
+			&l.ID, &l.OfferID, &l.Quantity, &l.UnitPriceKurus, &l.LineTotalKurus,
+			&l.MarketplaceDiscountKurus, &l.SellerDiscountKurus, &l.PaidKurus, &l.ReturnedQuantity, &l.CategoryID); err != nil {
 			return nil, err
 		}
 		if shipmentSts != nil {

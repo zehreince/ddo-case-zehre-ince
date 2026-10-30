@@ -31,11 +31,13 @@ func (h *Handler) Mount(r chi.Router) {
 		r.With(auth.RequireRole(auth.RoleCustomer)).Get("/", h.list)
 		r.With(auth.RequireRole(auth.RoleCustomer, auth.RoleOperations, auth.RoleAdmin)).Get("/{id}", h.get)
 		r.With(auth.RequireRole(auth.RoleCustomer), h.idempotency).Post("/{id}/cancel", h.cancel)
+		r.With(auth.RequireRole(auth.RoleCustomer, auth.RoleOperations, auth.RoleAdmin)).Post("/{id}/refund-quote", h.refundQuote)
 	})
 }
 
 type placeRequest struct {
-	Items []inventory.Item `json:"items"`
+	Items       []inventory.Item `json:"items"`
+	CouponCodes []string         `json:"coupon_codes"`
 }
 
 func (h *Handler) place(w http.ResponseWriter, r *http.Request) {
@@ -44,12 +46,16 @@ func (h *Handler) place(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusBadRequest, httpx.CodeBadRequest, "gövde geçerli JSON değil")
 		return
 	}
-	if fields := ValidateItems(in.Items); len(fields) > 0 {
+	fields := ValidateItems(in.Items)
+	if len(in.CouponCodes) > MaxCoupons {
+		fields["coupon_codes"] = "en fazla 5 kupon"
+	}
+	if len(fields) > 0 {
 		httpx.ValidationError(w, fields)
 		return
 	}
 	p, _ := auth.PrincipalFrom(r.Context())
-	o, err := h.svc.Place(r.Context(), p.UserID, in.Items, httpx.RequestIDFrom(r.Context()))
+	o, err := h.svc.Place(r.Context(), p.UserID, in.Items, httpx.RequestIDFrom(r.Context()), WithCoupons(in.CouponCodes))
 	if err != nil {
 		h.writeError(w, r, err)
 		return
@@ -110,6 +116,40 @@ func (h *Handler) cancel(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusOK, o)
 }
 
+type refundQuoteRequest struct {
+	Items []ReturnItem `json:"items"`
+}
+
+// refundQuote kısmi iadenin tutarını (kupon geri hesabıyla) gösterir; bir şey değiştirmez.
+func (h *Handler) refundQuote(w http.ResponseWriter, r *http.Request) {
+	id, ok := orderID(w, r)
+	if !ok {
+		return
+	}
+	var in refundQuoteRequest
+	if err := httpx.Decode(w, r, &in); err != nil {
+		httpx.Error(w, http.StatusBadRequest, httpx.CodeBadRequest, "gövde geçerli JSON değil")
+		return
+	}
+	p, _ := auth.PrincipalFrom(r.Context())
+	if p.Role == auth.RoleCustomer {
+		o, err := h.svc.Get(r.Context(), id)
+		if err == nil && o.CustomerID != p.UserID {
+			err = ErrNotFound
+		}
+		if err != nil {
+			h.writeError(w, r, err)
+			return
+		}
+	}
+	q, err := h.svc.RefundQuote(r.Context(), id, in.Items)
+	if err != nil {
+		h.writeError(w, r, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, q)
+}
+
 // orderID yol parametresini doğrular; bozuk kimlik veritabanına gitmeden 404 olur.
 func orderID(w http.ResponseWriter, r *http.Request) (string, bool) {
 	id := chi.URLParam(r, "id")
@@ -130,6 +170,8 @@ func (h *Handler) writeError(w http.ResponseWriter, r *http.Request, err error) 
 		httpx.Error(w, http.StatusNotFound, httpx.CodeNotFound, err.Error())
 	case errors.Is(err, ErrNotCancellable):
 		httpx.Error(w, http.StatusConflict, "invalid_state", err.Error())
+	case errors.Is(err, ErrInvalidReturn):
+		httpx.ValidationError(w, map[string]string{"items": err.Error()})
 	default:
 		httpx.Internal(w, r, h.log, err)
 	}
